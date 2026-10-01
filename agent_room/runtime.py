@@ -1,0 +1,447 @@
+"""One process supervisor per room, native workers, durable dispatch receipts."""
+
+import asyncio
+import hashlib
+from itertools import zip_longest
+import json
+import os
+from pathlib import Path
+import secrets
+import signal
+import subprocess
+import sys
+import time
+
+from agent_room.common import (GATEWAY, MEMBERS, MODES, acting_member, PLUGIN_ROOT, RoomError, dumps, file_lock,
+                               now, process_alive, process_stamp, uid)
+from agent_room.native import (CodexClient, claude_agents, doctor, exact_claude,
+                               owned_descendants, send_claude, start_claude, stop_claude_worker,
+                               stop_descendants, wait_for_exit)
+from agent_room.store import Store
+
+
+def bind_main(store, session, permission_mode="default"):
+    if not session:
+        raise RoomError("Run this command from the Claude main session", "identity")
+    native = exact_claude(store.project, session)
+    owner = {"session": session, "pid": native["pid"], "stamp": process_stamp(native["pid"]),
+             "permission_mode": permission_mode}
+    with store.tx() as db:
+        room = store.get_room(db)
+        old = room.get("owner") or {}
+        if old and old["session"] != session and process_alive(old["pid"], old["stamp"]):
+            # /clear changes the session UUID in the SAME native process.
+            if old["pid"] != owner["pid"] or old["stamp"] != owner["stamp"]:
+                raise RoomError("Another live Claude session owns this room", "conflict")
+        room["owner"] = owner
+        store.put_room(db, room)
+    store.member(GATEWAY, {"native_id": session, "pid": owner["pid"], "stamp": owner["stamp"],
+                               "status": "active", "permission_mode": permission_mode})
+    return owner
+
+
+def start_room(store, session, mode=None, permission_mode="default", automatic=False):
+    if acting_member() != GATEWAY:
+        raise RoomError("A worker cannot become the room's admin session", "authority")
+    checks = doctor()
+    if not checks["ok"]:
+        raise RoomError("Native dependencies are not ready; run doctor", "dependency", checks=checks)
+    with file_lock(store.runtime / "control.lock"):
+        owner = bind_main(store, session, permission_mode)
+        with store.tx() as db:
+            room = store.get_room(db)
+            supervisor = room.get("supervisor") or {}
+            if automatic and room["manual_stop"]:
+                return {"started": False, "reason": "manual stop persists until /agent-room:start"}
+            if process_alive(supervisor.get("pid"), supervisor.get("stamp")):
+                if mode and mode != room["mode"]:
+                    raise RoomError("Stop the room before changing mode", "conflict")
+                if room["status"] == "stopping":
+                    room["restart_requested"] = True
+                    room["manual_stop"] = False
+                    store.put_room(db, room)
+                    return {"started": False, "reason": "Exact-session restart scheduled after owned cleanup completes"}
+                return {"started": False, "reason": "supervisor already running", "room": room}
+            target_mode = mode or room["mode"]
+            if target_mode not in MODES:
+                raise RoomError("Unknown mode")
+            if target_mode != room["mode"]:
+                if room["status"] not in {"stopped", "failed"}:
+                    raise RoomError("Stop and reconcile the room before changing mode", "conflict")
+                for row in db.execute("SELECT data FROM tasks"):
+                    task = json.loads(row[0])
+                    if task["owner"] not in MODES[target_mode] and task["state"] not in {"done", "cancelled"}:
+                        raise RoomError("Hand off open tasks of members being disabled before changing mode", "conflict", task=task["id"])
+                    if task.get("reviewer") and task["reviewer"] not in MODES[target_mode] and task["state"] not in {"done", "cancelled"}:
+                        raise RoomError("Reassign pending reviewers before disabling their member", "conflict", task=task["id"])
+            generation = uid()
+            room.update(mode=target_mode, status="starting", generation=generation, manual_stop=False, restart_requested=False, error=None)
+            store.put_room(db, room)
+        env = dict(os.environ)
+        env.pop("AGENT_ROOM_MEMBER_TOKEN", None)
+        with open(store.runtime / "supervisor.log", "a", encoding="utf-8") as log:
+            try:
+                process = subprocess.Popen([sys.executable, str(PLUGIN_ROOT / "bin" / "agent-room"),
+                    "--project", str(store.project), "_serve", "--generation", generation],
+                    cwd=store.project, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                    start_new_session=True)
+            except OSError as exc:
+                with store.tx() as db:
+                    room = store.get_room(db)
+                    room.update(status="failed", error="Could not launch supervisor")
+                    store.put_room(db, room)
+                raise RoomError("Could not launch supervisor", "native") from exc
+            with store.tx() as db:
+                room = store.get_room(db)
+                if room["generation"] == generation:
+                    room["supervisor"] = {"pid": process.pid, "stamp": process_stamp(process.pid)}
+                    store.put_room(db, room)
+        return {"started": True, "status": "starting", "generation": generation,
+                "note": "Launch requested. status reports native readiness; this is not a model-response receipt."}
+
+
+def request_stop(store, manual=True, session=None):
+    with store.tx() as db:
+        room = store.get_room(db)
+        if session and (room.get("owner") or {}).get("session") != session:
+            return {"requested": False, "reason": "not owner"}
+        room["manual_stop"] = manual or room["manual_stop"]
+        if manual:
+            room["restart_requested"] = False
+        if room["status"] not in {"stopped", "failed"}:
+            room["status"] = "stopping"
+        store.put_room(db, room)
+        return {"requested": True, "status": room["status"]}
+
+
+def approval_response(store, actor, approval_id, source, decision):
+    store.main_only(actor)
+    if decision not in {"accept", "decline", "cancel"}:
+        raise RoomError("V1 supports one-request accept, decline or cancel; no persistent policy changes")
+    with store.tx() as db:
+        store.source(db, source, "native_approval")
+        prompt = db.execute("SELECT origin FROM prompts WHERE id=?", (source,)).fetchone()
+        if prompt["origin"] != "hook":
+            raise RoomError("Native approval requires a fresh human prompt receipt; manual recovery is not eligible", "authority")
+        row = db.execute("SELECT data FROM approvals WHERE id=?", (approval_id,)).fetchone()
+        if not row:
+            raise RoomError("Unknown native request")
+        data = json.loads(row[0])
+        if not data.get("supported") or data["state"] != "pending":
+            raise RoomError("Request is unsupported or no longer pending; use its native UI", "conflict")
+        if data["generation"] != store.get_room(db)["generation"]:
+            raise RoomError("Request belongs to an earlier native process", "conflict")
+        data.update(state="respond", response={"decision": decision}, source=source)
+        db.execute("UPDATE approvals SET data=? WHERE id=?", (dumps(data), approval_id))
+        return data
+
+
+class Supervisor:
+    def __init__(self, store, generation):
+        self.store, self.generation = store, generation
+        self.codex = {}
+        self.claude = {}
+        self.stopping = False
+        self.error = None
+        self.recovered = False
+        self.last_registry_check = 0
+
+    def worker_env(self, name):
+        binding = secrets.token_hex(24)
+        self.store.member(name, {"token_hash": hashlib.sha256(binding.encode()).hexdigest()})
+        env = dict(os.environ)
+        env.update(AGENT_ROOM_MEMBER=name, AGENT_ROOM_BINDING=binding,
+                   AGENT_ROOM_PROJECT=str(self.store.project),
+                   CLAUDE_CODE_DISABLE_BG_EXIT_HANDOFF="1")
+        env.pop("AGENT_ROOM_SESSION_ID", None)
+        env.pop("CLAUDE_CODE_MESSAGING_TOKEN", None)
+        env.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
+        env.pop("CLAUDE_ENV_FILE", None)
+        env["PATH"] = str(PLUGIN_ROOT / "bin") + os.pathsep + env.get("PATH", "")
+        return env
+
+    async def recover_owned(self):
+        # A stale coordinator cannot authorize replay of an unknown dispatch.
+        self.store.interrupt_attempts("Supervisor restarted; reconcile before retrying unknown effects")
+        with self.store.tx() as db:
+            db.execute("UPDATE messages SET status='unknown',detail='Supervisor restarted during dispatch; reconcile before retry' WHERE status='dispatching'")
+            for row in db.execute("SELECT id,data FROM approvals").fetchall():
+                data = json.loads(row["data"])
+                if data["state"] in {"pending", "respond", "submitted"}:
+                    data.update(state="expired", detail="Native connection ended; await a new request")
+                    db.execute("UPDATE approvals SET data=? WHERE id=?", (dumps(data), row["id"]))
+        for name in MEMBERS:
+            if name == GATEWAY:
+                continue
+            member = self.store.member(name)
+            if name.startswith("CLAUDE") and member["native_id"]:
+                # Stop by exact session identity, never by name or global daemon.
+                try:
+                    live = await asyncio.to_thread(exact_claude, self.store.project, member["native_id"])
+                except RoomError as exc:
+                    if exc.code != "unavailable":
+                        raise
+                    live = None
+                if live and (live["pid"] != member.get("pid") or not process_alive(member.get("pid"), member.get("stamp"))):
+                    raise RoomError("Saved Claude session is running outside the recorded worker process; close its other controller before starting", "identity")
+                await stop_claude_worker(self.store.project, member["native_id"], member)
+            elif process_alive(member.get("pid"), member.get("stamp")):
+                children = owned_descendants(member["pid"])
+                if os.getpgid(member["pid"]) != member["pid"]:
+                    raise RoomError("Stale native process group cannot be attributed safely", "identity")
+                os.killpg(member["pid"], signal.SIGTERM)
+                owned = {member["pid"]: member["stamp"]}
+                if not await wait_for_exit(owned):
+                    os.killpg(member["pid"], signal.SIGKILL)
+                await stop_descendants(children)
+                if not await wait_for_exit(owned):
+                    raise RoomError("Cannot confirm stale Codex worker exit", "cleanup")
+            self.store.member(name, {"status": "stopped", "pid": None, "stamp": None, "turn_id": None})
+        self.recovered = True
+
+    async def launch(self):
+        await self.recover_owned()
+        room = self.store.room()
+        for name in MODES[room["mode"]]:
+            if name == GATEWAY:
+                continue
+            if self.stopping or not self.owner_alive() or self.store.room()["status"] == "stopping":
+                return
+            member = self.store.member(name)
+            env = self.worker_env(name)
+            self.store.member(name, {"status": "starting", "error": None, "unexpected_native_id": None})
+            if name.startswith("CODEX"):
+                client = CodexClient(self.store.project, name, env, self.store.runtime / (name + ".log"))
+                self.codex[name] = client  # Own cleanup even when initialization fails.
+                await client.start(member["native_id"])
+                self.store.member(name, {"native_id": client.thread_id, "pid": client.process.pid,
+                    "stamp": client.stamp, "status": "idle", "turn_id": client.turn_id,
+                    "permission_class": client.permission_class})
+            else:
+                native_id = member["native_id"]
+                self.claude[name] = native_id
+                try:
+                    native = await start_claude(self.store.project, native_id, bool(member["native_id"]),
+                                               env, self.store.runtime / (name + ".log"))
+                except RoomError as exc:
+                    reported = exc.details.get("reported_new_ids", [])
+                    registered = self.store.member(name)
+                    observed = registered.get("unexpected_native_id") or (registered["native_id"] if not native_id else None)
+                    if observed or len(reported) == 1:
+                        created_id = observed or reported[0]
+                        created = await asyncio.to_thread(exact_claude, self.store.project, created_id)
+                        self.claude[name] = created_id  # Owned copy is cleaned, never adopted as the saved ID.
+                        self.store.member(name, {"pid": created["pid"], "stamp": process_stamp(created["pid"]),
+                                                 "unexpected_native_id": created_id})
+                    raise
+                self.claude[name] = native["sessionId"]
+                self.store.member(name, {"native_id": native["sessionId"], "job_id": native.get("id"),
+                                         "pid": native["pid"], "stamp": process_stamp(native["pid"]), "status": "idle"})
+        self.store.wake_resumed_work(self.generation)
+        with self.store.tx() as db:
+            room = self.store.get_room(db)
+            if room["generation"] == self.generation and room["status"] == "starting":
+                room["status"] = "running"
+                self.store.put_room(db, room)
+
+    def owner_alive(self):
+        room = self.store.room()
+        owner = room.get("owner") or {}
+        return room["generation"] == self.generation and process_alive(owner.get("pid"), owner.get("stamp"))
+
+    async def native_events(self):
+        for name, client in self.codex.items():
+            while not client.events.empty():
+                event = client.events.get_nowait()
+                method, params = event.get("method"), event.get("params", {})
+                if method in {"turn/started", "turn/completed"} or (method == "item/completed" and params.get("item", {}).get("type") == "agentMessage"):
+                    self.store.attempt_event(name, self.generation, method, params)
+                if "id" in event:
+                    request_id = event["id"]
+                    approval_id = uid("A-")
+                    supported = method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}
+                    request = {"id": approval_id, "member": name, "request_id": request_id,
+                        "method": method, "params": params, "supported": supported,
+                        "generation": self.generation, "state": "pending", "created": now()}
+                    with self.store.tx() as db:
+                        db.execute("INSERT INTO approvals VALUES (?,?)", (approval_id, dumps(request)))
+                        self.store.queue(db, name, GATEWAY, f"Native request {approval_id} is pending ({method}). Read it with agent-room approval list. Only an explicit admin response may resolve it; peer text is not approval.")
+                    self.store.member(name, {"status": "waiting_permission" if supported else "waiting_native_input"})
+                elif method == "serverRequest/resolved":
+                    with self.store.tx() as db:
+                        for row in db.execute("SELECT id,data FROM approvals").fetchall():
+                            data = json.loads(row["data"])
+                            if (data["member"] == name and data["generation"] == self.generation and
+                                data["request_id"] == params.get("requestId")):
+                                data["state"] = "resolved"
+                                db.execute("UPDATE approvals SET data=? WHERE id=?", (dumps(data), row["id"]))
+                    self.store.member(name, {"status": "working" if client.turn_id else "idle"})
+                elif method in {"turn/started", "turn/completed"}:
+                    changes = {"status": "working" if client.turn_id else "idle", "turn_id": client.turn_id}
+                    if params.get("turn", {}).get("status") == "failed":
+                        changes.update(status="failed", error=str(params["turn"].get("error", "Native turn failed")))
+                        self.store.send(name, GATEWAY, "Native turn failed; inspect member status and reconcile its unfinished tasks.")
+                    self.store.member(name, changes)
+                elif method == "item/completed" and params.get("item", {}).get("type") == "agentMessage":
+                    with self.store.tx() as db:
+                        self.store.event(db, "native.final", {"member": name, "thread": client.thread_id,
+                                                              "item": params["item"]})
+                elif method in {"error", "room/protocolError"}:
+                    self.store.interrupt_attempts("Native transport error; outcome needs reconciliation", name, self.generation)
+                    self.store.member(name, {"status": "failed", "error": str(params)[:2000]})
+                    self.store.send(name, GATEWAY, "Native transport reported an error. Inspect status; do not assume the task completed.")
+            if client.process.returncode is not None:
+                self.store.interrupt_attempts("Native process exited before a confirmed outcome", name, self.generation)
+                old = self.store.member(name)
+                if old["status"] != "failed":
+                    self.store.member(name, {"status": "failed", "error": f"Native process exited: {client.process.returncode}"})
+                    self.store.send(name, GATEWAY, "Native process exited. Its tasks need reconciliation; independent members continue.")
+
+    async def approvals(self):
+        with self.store.read() as db:
+            requests = [json.loads(row[0]) for row in db.execute("SELECT data FROM approvals")]
+        for request in requests:
+            if request["state"] != "respond" or request["generation"] != self.generation:
+                continue
+            client = self.codex.get(request["member"])
+            if not client:
+                continue
+            # Persist uncertainty before sending; never replay approval on a new connection.
+            with self.store.tx() as db:
+                current = json.loads(db.execute("SELECT data FROM approvals WHERE id=?", (request["id"],)).fetchone()[0])
+                if current["state"] != "respond":
+                    continue
+                current["state"] = "submitted"
+                db.execute("UPDATE approvals SET data=? WHERE id=?", (dumps(current), request["id"]))
+            await client.respond(request["request_id"], request["response"])
+
+    async def dispatch(self):
+        room = self.store.room()
+        paused = {"waiting_permission", "waiting_native_input", "failed", "stopped"}
+        with self.store.read() as db:
+            queues = []
+            for name in MODES[room["mode"]]:
+                member = json.loads(db.execute("SELECT data FROM members WHERE name=?", (name,)).fetchone()[0])
+                if member["status"] not in paused:
+                    queues.append([dict(row) for row in db.execute(
+                        "SELECT * FROM messages WHERE status='queued' AND recipient=? ORDER BY seq LIMIT 20", (name,))])
+            # Bound each selection, alternate eligible recipients, and retain FIFO within each inbox.
+            messages = [message for batch in zip_longest(*queues) for message in batch if message is not None][:20]
+        for message in messages:
+            target = message["recipient"]
+            if target not in MODES[room["mode"]]:
+                continue
+            member = self.store.member(target)
+            if member["status"] in paused:
+                continue
+            # Refresh per delivery: an earlier message in this same batch may have failed.
+            with self.store.read() as db:
+                message["pending_recovery"] = bool(db.execute(
+                    "SELECT 1 FROM messages WHERE recipient=? AND status IN ('failed','unknown') LIMIT 1",
+                    (target,)).fetchone())
+            if message["task"]:
+                message["context_pack"] = self.store.task_context(message["task"], compact=True)
+            attempt = self.store.begin_attempt(message, self.generation)
+            if not attempt:
+                continue
+            if "knowledge_reference" in attempt:
+                message["knowledge_reference"] = attempt["knowledge_reference"]
+            turn_id = None
+            try:
+                if target.startswith("CODEX"):
+                    result = await self.codex[target].send(message)
+                    turn_id = self.codex[target].last_sent_turn_id
+                    self.store.member(target, {"status": "working", "turn_id": self.codex[target].turn_id})
+                else:
+                    sender = self.store.member(message["sender"])
+                    mode = sender.get("permission_class", "bypass" if sender.get("permission_mode") in {"bypassPermissions", "plan"} else "prompting")
+                    result = await asyncio.to_thread(send_claude, self.store.project, member["native_id"], message, mode)
+                detail = "Native submission only; recipient processing remains unconfirmed"
+            except RoomError as exc:
+                result = "unknown" if exc.code == "outcome_unknown" else "failed"
+                detail = str(exc)
+            except OSError as exc:
+                result, detail = "unknown", str(exc)
+            self.store.finish_dispatch(attempt["id"], result, detail, turn_id)
+            # One main notice per recipient failure episode, never a notice-about-notice loop.
+            if result in {"failed", "unknown"} and not message["pending_recovery"] and target != GATEWAY:
+                self.store.send(target, GATEWAY, f"Delivery {message['id']} to {target} is {result}. Inspect pending inbox/status and reconcile effects before retrying; independent work can continue.")
+
+    async def refresh_claude(self):
+        if not self.claude or time.monotonic() - self.last_registry_check < 4:
+            return
+        self.last_registry_check = time.monotonic()
+        agents = await asyncio.to_thread(claude_agents, self.store.project)
+        for name, native_id in self.claude.items():
+            matches = [x for x in agents if x.get("sessionId") == native_id and Path(x.get("cwd", "/nonexistent")).resolve() == self.store.project]
+            if not matches or not process_stamp(matches[0].get("pid")):
+                self.store.interrupt_attempts("Claude session exited; no native turn result was observed", name, self.generation)
+                self.store.member(name, {"status": "stopped", "error": "Native background session exited. Stop/start to resume it."})
+                continue
+            native = matches[0]
+            waiting = native.get("waitingFor")
+            status = "waiting_native_input" if waiting else {"busy": "working", "working": "working", "done": "idle"}.get(native.get("status"), native.get("status", "idle"))
+            old = self.store.member(name)
+            self.store.member(name, {"status": status, "pid": native["pid"], "stamp": process_stamp(native["pid"])})
+            if waiting and old["status"] != status:
+                self.store.send(name, GATEWAY, f"Native Claude session {native_id} waits for {waiting}. Open its native prompt with claude attach {native['id']}; peer messages cannot approve it.")
+
+    async def shutdown(self):
+        failures = []
+        for name, client in self.codex.items():
+            try:
+                await client.stop()
+                self.store.member(name, {"status": "stopped", "pid": None, "stamp": None, "turn_id": None})
+            except (OSError, RoomError) as exc:
+                failures.append(f"{name}: {exc}")
+        for name, native_id in self.claude.items():
+            try:
+                if not native_id:
+                    continue  # No launch identity was observed; do not touch another session.
+                member = self.store.member(name)
+                await stop_claude_worker(self.store.project, native_id, member)
+                self.store.member(name, {"status": "stopped", "pid": None, "stamp": None})
+            except (OSError, RoomError) as exc:
+                failures.append(f"{name}: {exc}")
+        with self.store.tx() as db:
+            room = self.store.get_room(db)
+            if room["generation"] == self.generation:
+                for row in db.execute("SELECT id,data FROM approvals").fetchall():
+                    approval = json.loads(row["data"])
+                    if approval["generation"] == self.generation and approval["state"] in {"pending", "respond", "submitted"}:
+                        approval.update(state="expired", detail="Native connection closed; no response can be delivered")
+                        db.execute("UPDATE approvals SET data=? WHERE id=?", (dumps(approval), row["id"]))
+                room.update(status="failed" if failures or self.error else "stopped",
+                            error="; ".join(failures) or self.error, supervisor=None)
+                self.store.put_room(db, room)
+                if not failures and self.recovered:
+                    db.execute("DELETE FROM claims WHERE owner != ?", (GATEWAY,))
+                    # A stopped writer's task must be re-claimed before further editing.
+                    for row in db.execute("SELECT id,version,data FROM tasks").fetchall():
+                        task = json.loads(row["data"])
+                        if task["owner"] != GATEWAY and task["state"] == "running":
+                            task["state"] = "ready"
+                            self.store.save(db, "tasks", task, row["version"])
+        self.store.interrupt_attempts("Room stopped without a confirmed native result; reconcile before retry", generation=self.generation)
+        self.store.project_views()
+
+    async def run(self):
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, lambda: setattr(self, "stopping", True))
+        with file_lock(self.store.runtime / "supervisor.lock", blocking=False):
+            try:
+                await self.launch()
+                while not self.stopping and self.owner_alive() and self.store.room()["status"] != "stopping":
+                    await self.native_events()
+                    await self.approvals()
+                    await self.refresh_claude()
+                    await self.dispatch()
+                    await asyncio.sleep(.3)
+            except (RoomError, OSError, ValueError, KeyError) as exc:
+                self.error = str(exc)
+            finally:
+                await self.shutdown()
+        room = self.store.room()
+        if room.get("restart_requested") and not room["manual_stop"] and room["status"] == "stopped" and self.owner_alive():
+            start_room(self.store, room["owner"]["session"], permission_mode=room["owner"]["permission_mode"], automatic=True)

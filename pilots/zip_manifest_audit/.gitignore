@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.tmp/
+.claude/settings.local.json
+
+
+<!-- agent-room:begin -->
+agents_space/.runtime/
+agents_space/tasks/active.md
+agents_space/state/current_decisions.md
+<!-- agent-room:end -->

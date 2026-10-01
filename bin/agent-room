@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""Plugin-local executable; location is resolved after Claude copies its cache."""
+
+from pathlib import Path
+import sys
+
+if sys.version_info < (3, 11):
+    raise SystemExit("Agent Room requires Python 3.11 or later; no files changed.")
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from agent_room.cli import main
+
+raise SystemExit(main())

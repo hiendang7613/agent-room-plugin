@@ -1,0 +1,13 @@
+{
+  "name": "agent-room-marketplace",
+  "description": "Native Claude Code and Codex agent rooms with shared durable coordination.",
+  "owner": {"name": "Vulcan Labs"},
+  "plugins": [
+    {
+      "name": "agent-room",
+      "source": "./",
+      "description": "Native Claude Code + Codex rooms",
+      "version": "0.3.20"
+    }
+  ]
+}

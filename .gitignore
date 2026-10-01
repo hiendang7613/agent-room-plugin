@@ -1,0 +1,37 @@
+# Allowlist: only the product and its documentation are ever tracked. Everything else at the top level
+# (campaign records, benchmark evidence, third-party copies, build output) stays local.
+/*
+!/.gitignore
+!/LICENSE
+!/README.md
+!/related_repos.md
+!/.claude-plugin/
+!/agent_room/
+!/bin/
+!/hooks/
+!/resources/
+!/scripts/
+!/skills/
+!/templates/
+!/tests/
+!/docs/
+# Fixtures that tests read (kept small on purpose).
+!/dist/
+/dist/*
+!/dist/agent-room-0.3.1.zip
+!/pilots/
+/pilots/*
+!/pilots/zip_manifest_audit/
+!/labs/
+/labs/*
+!/labs/benchmark_v2/
+/labs/benchmark_v2/*
+!/labs/benchmark_v2/g1_receipt_audit/
+
+__pycache__/
+*.py[cod]
+.DS_Store
+.coverage
+agents_space/.runtime/
+*.sqlite3
+*.sqlite3-*
