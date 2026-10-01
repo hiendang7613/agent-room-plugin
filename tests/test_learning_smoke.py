@@ -129,5 +129,6 @@ class LearningBudgetTests(unittest.TestCase):
             self.assertEqual(check.returncode, 0, check.stderr)
             scope = json.loads(check.stdout)
             self.assertFalse(scope["execute"])
-            self.assertEqual(scope["proposed_scope"]["max_room_messages"], 6)
+            self.assertEqual(scope["proposed_scope"]["max_room_messages"], 18)
+            self.assertEqual(scope["proposed_scope"]["max_persistent_members"], 4)
             self.assertFalse(project.exists())

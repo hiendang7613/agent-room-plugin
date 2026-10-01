@@ -63,16 +63,16 @@ class CompactStatusTests(EvidenceFixture, unittest.TestCase):
         before = self.store.path.read_bytes()
         for compact in (False, True):
             result = self.store.status(compact=compact)
-            self.assertEqual(result["message_counts"], {"processed": 2, "unknown": 1, "failed": 1, "queued": 1})
+            self.assertEqual(result["message_counts"], {"processed": 2, "unknown": 1, "failed": 1, "queued": 11})
             self.assertEqual(result["attempt_counts"], {"completed": 1, "unknown": 1, "failed": 1, "accepted": 1})
             task = result["tasks"][0]
             self.assertEqual(task["id"], active["id"])
             self.assertEqual(task["latest_attempt"]["id"], attempts[1]["id"])
             self.assertEqual(task["last_progress"], "2099-01-02")
-            self.assertEqual(task["unprocessed_messages"], 2)
+            self.assertEqual(task["unprocessed_messages"], 8)
             if not compact:
                 self.assertEqual(result["tasks"][1]["latest_attempt"]["id"], attempts[2]["id"])
-                self.assertEqual(result["tasks"][1]["unprocessed_messages"], 1)
+                self.assertEqual(result["tasks"][1]["unprocessed_messages"], 3)
         self.assertEqual(before, self.store.path.read_bytes())
 
     def test_pending_inbox_rollup_is_read_only_and_keeps_transport_states_separate(self):
@@ -98,14 +98,15 @@ class CompactStatusTests(EvidenceFixture, unittest.TestCase):
             "advisory": True,
             "by_member": {
                 "CLAUDE_01": {"count": 1, "statuses": {"queued": 1}},
-                "CODEX_01": {"count": 1, "statuses": {"unknown": 1}},
-                "CODEX_EXPERT": {"count": 1, "statuses": {"accepted": 1}},
+                "CODEX_01": {"count": 4, "statuses": {"queued": 3, "unknown": 1}},
+                "CLAUDE_EXPERT": {"count": 4, "statuses": {"queued": 4}},
+                "CODEX_EXPERT": {"count": 2, "statuses": {"queued": 1, "accepted": 1}},
             },
             "read_command": "agent-room inbox --pending --after 0",
         }
         self.assertEqual(full["pending_inboxes"], expected)
         self.assertEqual(compact["pending_inboxes"], expected)
-        self.assertEqual(full["message_counts"], {"processed": 1, "queued": 1, "accepted": 1, "unknown": 1})
+        self.assertEqual(full["message_counts"], {"processed": 1, "queued": 9, "accepted": 1, "unknown": 1})
         self.assertEqual(before, self.store.path.read_bytes())
 
     def test_status_query_count_does_not_grow_for_each_unreviewed_task_or_note(self):
@@ -168,7 +169,7 @@ class CompactStatusTests(EvidenceFixture, unittest.TestCase):
         self.assertIn("large-result", dumps(full))
         self.assertEqual(compact["message_counts"], full["message_counts"])
         self.assertEqual(compact["attempt_counts"], full["attempt_counts"])
-        self.assertEqual(compact["tasks"][0]["unprocessed_messages"], 1)
+        self.assertEqual(compact["tasks"][0]["unprocessed_messages"], 3)
 
     def test_original_admin_text_approvals_claims_and_attention_are_never_previewed(self):
         task = self.task()

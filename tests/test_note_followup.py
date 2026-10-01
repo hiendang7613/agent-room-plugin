@@ -24,6 +24,10 @@ class NoteFollowupTests(EvidenceFixture, unittest.TestCase):
         with self.store.read() as db:
             return [dict(row) for row in db.execute(f"SELECT * FROM {table} ORDER BY rowid")]
 
+    def logical_messages(self):
+        return [message for message in self.records("messages")
+                if not json.loads(message["context"]).get("broadcast")]
+
     def test_author_can_answer_correct_and_reopen_question_without_admin_receipt(self):
         question = self.note("question")
         answered = self.store.resolve_note("CODEX_EXPERT", question["id"], 1,
@@ -55,15 +59,15 @@ class NoteFollowupTests(EvidenceFixture, unittest.TestCase):
     def test_one_notice_to_main_when_main_is_also_linked_task_owner(self):
         task = self.task()
         note = self.note(tasks=[task["id"], task["id"]])
-        messages = self.records("messages")
+        messages = self.logical_messages()
         self.assertEqual(len(messages), 1)
         self.assertEqual((messages[0]["recipient"], messages[0]["task"]), ("CLAUDE_01", task["id"]))
         self.assertIn(note["id"], messages[0]["body"])
         self.assertIn("v1", messages[0]["body"])
         self.store.resolve_note("CODEX_EXPERT", note["id"], 1,
             {"state": "rejected", "answer": "The experiment contradicted it."})
-        self.assertEqual(len(self.records("messages")), 2)
-        self.assertIn("rejected", self.records("messages")[-1]["body"])
+        self.assertEqual(len(self.logical_messages()), 2)
+        self.assertIn("rejected", self.logical_messages()[-1]["body"])
 
     def test_peer_cannot_resolve_another_authors_note_or_approve_their_own(self):
         note = self.note()
@@ -145,7 +149,7 @@ class NoteFollowupTests(EvidenceFixture, unittest.TestCase):
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(answer, ["First answer", "Second answer"]))
         self.assertCountEqual(results, ["saved", "conflict"])
-        self.assertEqual(len(self.records("messages")), 2)
+        self.assertEqual(len(self.logical_messages()), 2)
         self.assertEqual(len(self.store.revision_history("notes", note["id"])["items"]), 2)
 
     def test_history_event_failure_rolls_back_note_and_notice(self):

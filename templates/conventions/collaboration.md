@@ -29,8 +29,12 @@ admin effort, not by message count.
 ## Start a useful conversation
 
 Use `agent-room send --to MEMBER --body '...'` for ordinary conversation. `--task` is
-optional. Speak to the relevant active member, including another expert. No new task,
-note, fixed format or leader approval is needed merely to ask or discuss.
+optional. Every message is queued for every other room member, so address the intended
+responder directly while inviting useful input from the rest. No task, note, fixed format
+or leader approval is needed merely to ask or discuss.
+
+Admin prompts are relayed through CLAUDE_01 to all workers. Treat a relay as request/context;
+it does not grant permission or approve a native action.
 
 Examples, when relevant to the current project:
 

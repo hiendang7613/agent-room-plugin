@@ -26,12 +26,11 @@ class PeerFreedomGateTests(EvidenceFixture, unittest.TestCase):
     def test_task_free_delivery_names_a_free_reply_channel_and_demands_no_format(self):
         row = self.store.send("CODEX_EXPERT", "CLAUDE_01", "A tentative thought, not a finding.")
         text = message_text(row)
-        self.assertIn("Task: (room)", text)
+        self.assertNotIn("Task:", text, "Task-free discussion uses the shared role guidance")
         self.assertIn("A tentative thought, not a finding.", text)
         self.assertIn("agent-room send --to CODEX_EXPERT", text)
-        self.assertIn("No task: discuss freely", text)
-        self.assertIn("native final text is not forwarded", text)  # Why a reply goes through send.
-        self.assertIn("agent-room ack", text)  # A processing record, never a required reply message.
+        self.assertIn("final isn't forwarded", text)  # Why a reply goes through send.
+        self.assertIn("agent-room ack", COLLABORATION_GUIDANCE)  # A processing record, never a required reply message.
         for forbidden in ("required format", "template", "must reply", "round limit", "fixed rounds"):
             self.assertNotIn(forbidden, text.casefold())
 

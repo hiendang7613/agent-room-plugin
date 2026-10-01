@@ -73,6 +73,7 @@ def parser():
     start.add_argument("--mode", choices=MODES)
     status = commands.add_parser("status", help="Read current state, advisory attention and pending inbox counts; no work is started")
     status.add_argument("--compact", action="store_true", help="Active task summaries and read pointers; preserve full admin prompts, approvals and attention")
+    commands.add_parser("wakes", help="Read-only activity proxies per member: queued broadcast counts, message states, dispatch attempts/results and processing ACKs; not proof of a wake/read and no token counts")
     verify = commands.add_parser("verify-package", help="Read-only ZIP manifest integrity check; does not authenticate the publisher or require a room")
     verify.add_argument("archive", type=Path)
     commands.add_parser("doctor", help="Read-only CLI capability checks; no provider probe or automatic repair")
@@ -167,7 +168,7 @@ def parser():
     body.add_argument("--body", help="Inline text argument; avoids shell heredoc temporary files in a sandbox")
     send.add_argument("--task")
     send.add_argument("--knowledge", help="Link a shared lesson by ID; record its current version and expose later revisions on receipt")
-    send.add_argument("--id", help="Stable message ID for a repeated submission")
+    send.add_argument("--id", help="Stable message ID token for a repeated submission (ASCII letters/digits/._-; max 64 bytes)")
     inbox = commands.add_parser("inbox", help="Read this member's paginated messages")
     inbox.add_argument("--after", type=int, default=0)
     inbox.add_argument("--limit", type=int, default=50)
@@ -203,7 +204,7 @@ def parser():
     snapshot.add_argument("paths", nargs="+")
     history = commands.add_parser("history", help="Paginated durable messages/events/admin prompt history")
     history.add_argument("--kind", choices=("messages", "events", "prompts"), default="messages")
-    history.add_argument("--query", default="", help="All literal case-insensitive terms in message/prompt body or event JSON data (max 200 characters); returns full matching records")
+    history.add_argument("--query", default="", help="All literal case-insensitive terms in message ID/speakers/body, prompt body or event JSON data (max 200 characters); returns full matching records")
     history.add_argument("--after", type=int, default=0)
     history.add_argument("--limit", type=int, default=50)
     return root
@@ -264,6 +265,8 @@ def run(args):
     if command == "start":
         return start_room(store, os.environ.get("AGENT_ROOM_SESSION_ID"), args.mode,
                           os.environ.get("AGENT_ROOM_PERMISSION_MODE", "default"))
+    if command == "wakes":
+        return store.activity_report()
     if command == "status":
         status = store.status(compact=args.compact)
         def observed_alive(pid, stamp):
@@ -297,7 +300,8 @@ def run(args):
         if len(args.query) > 200:
             raise RoomError("Search query must be text, at most 200 characters")
         terms = args.query.casefold().split()
-        field = "data" if args.kind == "events" else "body"
+        field = ("data" if args.kind == "events" else
+                 "id || ' ' || sender || ' ' || recipient || ' ' || body || ' ' || context" if args.kind == "messages" else "body")
         selection = f" AND history_matches({field})" if terms else ""
         with store.read() as db:
             db.create_function("history_matches", 1, lambda content: matches_terms(content, terms))
@@ -401,7 +405,9 @@ def run(args):
             if not body.strip() or not args.source_ref.strip():
                 raise RoomError("Recovery requires original human text and its source reference")
             receipt = store.intake(os.environ["AGENT_ROOM_SESSION_ID"], body, origin="manual_recovery:" + args.source_ref)
-            return {"receipt": receipt, "origin": "manual_recovery", "native_permission_approval_eligible": False}
+            notification = store.broadcast_gateway_prompt(body, "recovery\0" + args.source_ref)
+            return {"receipt": receipt, "origin": "manual_recovery", "native_permission_approval_eligible": False,
+                    "notify_all_queued": notification["members"], "room_status": notification["room_status"]}
         store.account(actor, args.id, args.disposition, args.refs)
         return {"accounted": args.id}
     if command == "approval":

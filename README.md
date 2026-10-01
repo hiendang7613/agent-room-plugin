@@ -6,8 +6,8 @@ brainstorm, phản biện, nhắc việc, chia sẻ kinh nghiệm và chủ đ�
 
 **Plugin 0.3.20 · schema 3.** [ZIP cài đặt](dist/agent-room-0.3.20.zip) ·
 [Kiểm chứng](docs/verification-0.3.20.json) · [Kế hoạch benchmark](docs/benchmark-v2-plan.md).
-Bản này cải thiện khôi phục tin gửi lỗi và hướng dẫn khi tiếp tục phiên, đồng thời giảm context
-trùng lặp khi khởi động. Hành vi model thật của package chưa được nghiệm thu.
+Bản ZIP này cải thiện khôi phục tin gửi lỗi và hướng dẫn khi tiếp tục phiên. Source đang có thay đổi
+chưa đóng gói sau 0.3.20; ZIP 0.3.20 chưa có room bốn người mặc định hoặc notify-all.
 
 ## Bắt đầu làm việc
 
@@ -17,8 +17,19 @@ Trong Claude Code, mở project muốn làm việc rồi dùng:
 /init-agents-space
 ```
 
-Default có **CLAUDE_01 + CODEX_EXPERT**. CLAUDE_01 là session bạn đang chat; bạn tiếp tục giao việc
-ở đó bằng ngôn ngữ tự nhiên. Ví dụ:
+Mỗi room mới có đủ bốn members: **CLAUDE_01, CODEX_01, CLAUDE_EXPERT, CODEX_EXPERT**. CLAUDE_01
+là gateway bạn đang chat; ba member còn lại nhận thông báo room. `--mode full` vẫn chạy như alias
+tương thích, cùng roster bốn người.
+
+Mọi tin room xếp hàng cho ba member còn lại; supervisor thử gửi ngay khi queue hoạt động. Bản sao
+broadcast là FYI; chỉ member được gọi đích danh sở hữu yêu cầu hoặc task. Tin vẫn chờ nếu room/member
+đang dừng hoặc bị pause. `agent-room wakes` phân biệt hàng đợi, lần thử gửi và ACK; các số đó chưa
+chứng minh agent đã đọc hoặc cho biết token/cost.
+
+Runtime hiện vẫn kế thừa model/effort từ cấu hình native của host; model defaults trong roster chưa
+được áp dụng khi khởi chạy. Bằng chứng model thật, token và cost cho hành vi workspace mới chưa có.
+
+CLAUDE_01 là session bạn đang chat; bạn tiếp tục giao việc ở đó bằng ngôn ngữ tự nhiên. Ví dụ:
 
 > Tìm nguyên nhân lỗi upload, sửa trong scope hiện tại, nhờ đồng đội kiểm tra rồi báo kết quả.
 
@@ -30,15 +41,7 @@ Main tự xử lý task, scope, claim, inbox, review và knowledge qua công c�
 trao đổi trực tiếp khi hữu ích. Admin không cần tạo JSON, tra record ID hoặc quản lý từng tin nhắn.
 Đây là hướng dẫn cho agent, không phải bộ máy cưỡng chế tự hoàn thành mọi việc.
 
-Muốn đủ bốn members trong một room mới:
-
-```text
-/init-agents-space --mode full
-```
-
-Full gồm **CLAUDE_01, CODEX_01, CLAUDE_EXPERT, CODEX_EXPERT**. CODEX_01 thực hiện/tích hợp mặc định;
-hai experts bổ sung góc nhìn. Vai trò là điểm xuất phát; mọi member được đóng góp ý tưởng.
-Experts chỉ sửa file khi được giao scope implementation. Hội thoại thông thường không cần task.
+Vai trò không giới hạn đóng góp hay thảo luận.
 
 ## Theo dõi và tiếp tục
 
@@ -78,7 +81,7 @@ file cũ được giữ và bạn dùng `/agent-room:init-agents-space`. Init t�
 quản lý vào `AGENTS.md`, `CLAUDE.md`, `.gitignore` và giữ nội dung khác. Room thủ công đã tồn tại cần
 migration riêng; chạy lại init không đổi mode hay tạo thêm team. Repo chưa tự được publish lên GitHub.
 
-Đổi default/full cần stop và handoff task của member sắp tắt trước khi start ở mode mới.
+Room đang chạy cần stop/start để nạp code mới; việc đổi mode không còn cần thiết cho roster bốn người.
 Main/operator xử lý chi tiết; xem [upgrade và recovery](docs/v1.1.md) khi có xung đột hoặc nâng phiên bản.
 Re-init giữ guide tùy chỉnh. Agent có thể đọc tham chiếu hiện tại bằng `agent-room guide collaboration`.
 Controller/context native đang chạy không tự cập nhật chỉ vì source/ZIP mới đã được tạo.

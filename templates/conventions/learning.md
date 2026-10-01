@@ -98,8 +98,9 @@ correct, that the sender read it, or that a recipient processed it.
 Body/evidence text is not copied into the link. Free-form messages can still mention IDs without
 `--knowledge`; these are ordinary text and are not inferred into links. A stable message `--id`
 keeps its original reference on repeated sends, even after the lesson changes. Use a new message
-for a new follow-up. Saving/revising knowledge does not broadcast or wake everyone. Peers can
-challenge a lesson directly; search and share when useful instead of loading all memory each turn.
+for a new follow-up. Saving/revising knowledge does not create a room message. When a lesson merits
+immediate discussion, use `send --knowledge K-ID`; that message is queued for every other member.
+Peers can challenge a lesson directly; search and share when useful instead of loading all memory each turn.
 
 ## Understand admin style without inventing instructions
 

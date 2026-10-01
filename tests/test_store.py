@@ -270,7 +270,7 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(RoomError):
             self.store.acknowledge("CLAUDE_01", "m0", "Not recipient")
         self.store.acknowledge("CODEX_EXPERT", "m0", "Read finding and recorded checkpoint")
-        self.assertEqual(sum(self.store.status()["message_counts"].values()), 3)
+        self.assertEqual(sum(self.store.status()["message_counts"].values()), 9)
         self.assertEqual(self.store.status()["message_counts"]["processed"], 1)
 
     def test_reopen_and_source_snapshot(self):

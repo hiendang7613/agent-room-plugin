@@ -26,11 +26,14 @@ Admin describes goals in ordinary language; main operates the room tools and rep
 See [collaboration](conventions/collaboration.md) for the interface and peer freedom. After upgrading,
 `agent-room guide collaboration` serves the current reference without replacing custom project rules.
 
-- Default: CLAUDE_01 is the admin interface, executor and integrator; CODEX_EXPERT
-  proactively analyzes and reviews. Expert edits require an explicitly assigned implementation task.
-- Full: CODEX_01 is the default executor/integrator, CLAUDE_EXPERT studies model/prompt/schema/evidence,
-  and CODEX_EXPERT studies runtime/SDK/lifecycle/concurrency. CLAUDE_01 coordinates and may implement
-  independently assigned work. Lenses are not exclusive ownership.
+- Every new room has four persistent, addressable members in the default mode: CLAUDE_01 is the admin
+  gateway, CODEX_01 and the two experts receive room messages and may contribute within existing
+  authority. `full` remains a compatibility alias for this same roster.
+- A logical room message queues deliveries for all other members. The direct addressee owns its
+  request/task; other copies are FYI, but still wake their recipients. Paused/stopped members keep
+  messages queued until delivery is available.
+- The four model/effort defaults are currently recorded as roster metadata but are not passed to
+  native launch; agents inherit each host's active model/effort configuration.
 
 Use `agent-room --json status --compact` for current mode, native IDs, errors and waiting work.
 For a pending sweep, follow `next_after` through every page; `read_command` starts fresh sweeps
@@ -46,6 +49,6 @@ The SQLite database in .runtime is authoritative for tasks/decisions/messages. G
 task and decision Markdown are views; do not edit them. Long reviews and evidence can be ordinary
 files under reviews/. Checkpoints and metadata are local/private by default, not automatically published.
 
-Only the admin's main session initializes, starts or changes room mode. A mode has two or four
-persistent members; do not silently expand the team. Native subagents require existing task/host
-authorization and remain their parent's responsibility.
+Only the admin's main session initializes or starts the room. Default and `full` use the same four
+members, so selecting the alias does not change membership or require a task handoff. Native
+subagents require existing task/host authorization and remain their parent's responsibility.

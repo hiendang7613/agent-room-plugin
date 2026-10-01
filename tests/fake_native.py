@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import socket
 import subprocess
@@ -95,13 +96,16 @@ def app_server():
             emit({"id": request_id, "result": {"thread": {"id": thread, "turns": []}, "approvalPolicy": "on-request"}})
         elif method in {"turn/start", "turn/steer"}:
             text = params["input"][0]["text"]
-            if "crash after input" in text:
+            broadcast = re.match(r"\[Agent Room peer broadcast [^ ]+ from [^ ]+ to ([^;]+);", text)
+            direct_addressee = broadcast.group(1) if broadcast else None
+            is_direct_request = direct_addressee is None or direct_addressee == os.environ.get("AGENT_ROOM_MEMBER")
+            if "crash after input" in text and is_direct_request:
                 effect_id = params.get("clientUserMessageId")
                 if effect_id:
                     commit_external_effect(effect_id)
                 record("unknown_effect", {"message": effect_id})
                 os._exit(7)
-            if "spawn owned child" in text:
+            if "spawn owned child" in text and is_direct_request:
                 child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     start_new_session=True)
@@ -110,13 +114,13 @@ def app_server():
                 emit({"id": request_id, "error": {"code": -1, "message": "Wrong active turn"}})
                 continue
             active_turn = active_turn or str(uuid.uuid4())
-            if "send peer result" in text:
+            if "send peer result" in text and is_direct_request:
                 result = subprocess.run(["agent-room", "send", "--to", "CLAUDE_01"],
                     input="Fixture peer finding; source remains unchanged", text=True, capture_output=True)
                 record("peer_cli", {"returncode": result.returncode, "result": result.stdout})
             emit({"id": request_id, "result": {"turn": {"id": active_turn, "status": "inProgress"}}})
             emit({"method": "turn/started", "params": {"threadId": thread, "turn": {"id": active_turn, "status": "inProgress"}}})
-            if "needs approval" in text:
+            if "needs approval" in text and is_direct_request:
                 pending = "approval-42"
                 emit({"id": pending, "method": "item/commandExecution/requestApproval", "params": {
                     "threadId": thread, "turnId": active_turn, "itemId": "item-42", "startedAtMs": 1,

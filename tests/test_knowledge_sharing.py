@@ -59,7 +59,7 @@ class KnowledgeSharingTests(EvidenceFixture, unittest.TestCase):
         self.assertFalse(received["stale"], "Task staleness retains its separate meaning")
         with self.store.read() as db:
             persisted = dict(db.execute("SELECT * FROM messages WHERE id=?", (message["id"],)).fetchone())
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 3)
         self.assertEqual(persisted, message)
 
     def test_compact_inbox_keeps_current_knowledge_revision_and_queued_provenance(self):

@@ -37,6 +37,7 @@ CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
 PROTECTED_USES = frozenset({"native_approval", "task_create_implementation", "task_assign", "task_contract",
                             "task_cancel_or_reopen", "note_admin", "knowledge_admin", "message_retry"})
 UNPROTECTED_USES = frozenset({"account", "task_create_analysis"})
+MAX_MESSAGE_ID_BYTES = 64
 TASK_STATES = {"ready", "running", "blocked", "review", "done", "cancelled"}
 NOTE_STATES = {
     "question": {"open", "answered", "superseded"},
@@ -323,7 +324,7 @@ class Store:
             db.execute("INSERT INTO tasks VALUES (?,?,?)", (task["id"], 1, dumps(task)))
             self.event(db, "task.created", {"id": task["id"], "actor": actor})
             if task["owner"] != actor:
-                self.queue(db, actor, task["owner"], "New assigned task. Read the task and current decisions before acting.", task["id"])
+                self.notify(db, actor, task["owner"], "New assigned task. Read the task and current decisions before acting.", task["id"])
         return task
 
     def update_task(self, actor, task_id, expected, changes):
@@ -385,12 +386,12 @@ class Store:
             if state in {"done", "cancelled", "blocked", "review"} and actor == task["owner"]:
                 db.execute("DELETE FROM claims WHERE task=?", (task_id,))
             if changes.keys() & admin_fields and task["owner"] != actor:
-                self.queue(db, actor, task["owner"], "Task assignment or authority changed. Read its current revision.", task_id)
+                self.notify(db, actor, task["owner"], "Task assignment or authority changed. Read its current revision.", task_id)
             if state == "done" and previous_state != "done":
                 for row in db.execute("SELECT data FROM tasks").fetchall():
                     dependent = json.loads(row[0])
                     if task_id in dependent["dependencies"] and dependent["state"] not in {"done", "cancelled"}:
-                        self.queue(db, actor, dependent["owner"], f"Dependency {task_id} completed. Reconcile all remaining dependencies and blockers before continuing.", dependent["id"])
+                        self.notify(db, actor, dependent["owner"], f"Dependency {task_id} completed. Reconcile all remaining dependencies and blockers before continuing.", dependent["id"])
             self.event(db, "task.updated", {"id": task_id, "version": task["version"], "actor": actor})
         return task
 
@@ -493,7 +494,7 @@ class Store:
             db.execute("DELETE FROM claims WHERE task=? AND owner=?", (task_id, actor))
             self.event(db, "task.submitted", {"task": task_id, "submission": submission["id"], "actor": actor})
             if task["reviewer"]:
-                self.queue(db, actor, task["reviewer"], f"Review submission {submission['id']}. Read its source digest and current task context; record a review receipt after checking the listed files and acceptance evidence.", task_id)
+                self.notify(db, actor, task["reviewer"], f"Review submission {submission['id']}. Read its source digest and current task context; record a review receipt after checking the listed files and acceptance evidence.", task_id)
             return {"task": task, "submission": submission}
 
     def record_review(self, actor, submission_id, data):
@@ -542,7 +543,7 @@ class Store:
             self.save(db, "tasks", task, task["version"])
             self.event(db, "review.recorded", {"task": task["id"], "review": receipt["id"], "verdict": verdict, "actor": actor})
             for recipient in {task["owner"], GATEWAY} - {actor}:
-                self.queue(db, actor, recipient, f"Review {receipt['id']}: {verdict}. Read findings and current source before the next action; task completion remains separate.", task["id"])
+                self.notify(db, actor, recipient, f"Review {receipt['id']}: {verdict}. Read findings and current source before the next action; task completion remains separate.", task["id"])
             return receipt
 
     def checkpoint(self, actor, task_id, expected, data):
@@ -758,10 +759,10 @@ class Store:
             if task["owner"] != actor:
                 instruction = ("Read current decisions and reconcile affected work." if binding else
                                "Read the advisory note; the task contract and authority are unchanged.")
-                self.queue(db, actor, task["owner"], summary + instruction, task_id)
+                self.notify(db, actor, task["owner"], summary + instruction, task_id)
                 notified.add(task["owner"])
         for recipient in {GATEWAY, note["author"]} - notified - {actor}:
-            self.queue(db, actor, recipient, summary + f"Read agent-room note show {note['id']} before acting; this notice grants no authority.")
+            self.notify(db, actor, recipient, summary + f"Read agent-room note show {note['id']} before acting; this notice grants no authority.")
 
     def wake_resumed_work(self, generation):
         """Queue current obligations, never replay a previous native attempt."""
@@ -788,21 +789,44 @@ class Store:
                                         (member, task["id"])).fetchall()
                     if any(json.loads(message["context"]).get("task_version") == task["version"] for message in queued):
                         continue
-                    self.queue(db, GATEWAY, member,
-                               "Room resumed. " + body + " Do not replay effects of unknown outcome.", task["id"])
+                    self.notify(db, GATEWAY, member,
+                               "Room resumed. " + body + " Do not replay effects of unknown outcome.", task["id"],
+                               broadcast=False)
 
-    def queue(self, db, sender, recipient, body, task_id=None, message_id=None, *, knowledge_id=None):
+    def queue(self, db, sender, recipient, body, task_id=None, message_id=None, *, knowledge_id=None, kind=None,
+              admin_relay=False, broadcast_id=None, broadcast_recipient=None):
         if sender not in MEMBERS or recipient not in MEMBERS or not isinstance(body, str) or not body.strip():
             raise RoomError("Message requires a known recipient and nonempty body")
         if len(body) > 16000:
             raise RoomError("Keep messages under 16000 characters; link longer findings")
         message_id = message_id or uid("M-")
+        if not isinstance(message_id, str):
+            raise RoomError("Message ID must be text")
+        expected_kind = "task" if task_id else "peer"
+        kind = expected_kind if kind is None else kind
+        if kind not in {"peer", "task", "system"} or (kind != "system" and kind != expected_kind):
+            raise RoomError("Message kind must match peer/task context or be system")
         old = db.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
         if old:
-            old_knowledge = json.loads(old["context"]).get("knowledge", {}).get("id")
-            if (old["sender"], old["recipient"], old["task"], old["body"], old_knowledge) != (sender, recipient, task_id, body, knowledge_id):
+            old_context = json.loads(old["context"])
+            old_knowledge = old_context.get("knowledge", {}).get("id")
+            old_kind = old_context.get("kind", "task" if old["task"] else "peer")
+            old_admin_relay = old_context.get("admin_relay", False)
+            old_broadcast = old_context.get("broadcast", {})
+            wanted_broadcast = ({"id": broadcast_id, "direct_recipient": broadcast_recipient}
+                                if broadcast_id else {})
+            if (old["sender"], old["recipient"], old["task"], old["body"], old_knowledge, old_kind,
+                old_admin_relay, old_broadcast) != (sender, recipient, task_id, body, knowledge_id, kind,
+                                                     admin_relay, wanted_broadcast):
                 raise RoomError("Message ID reused with different content", "conflict")
             return dict(old)
+        try:
+            message_id_bytes = message_id.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise RoomError(f"Message ID must be an ASCII token of at most {MAX_MESSAGE_ID_BYTES} bytes") from exc
+        if (not message_id_bytes or len(message_id_bytes) > MAX_MESSAGE_ID_BYTES or
+                not all(char.isalnum() or char in "._-" for char in message_id)):
+            raise RoomError(f"Message ID must use letters, digits, dot, underscore or hyphen (max {MAX_MESSAGE_ID_BYTES} bytes)")
         context = {}
         if task_id:
             task = self.record(db, "tasks", task_id)
@@ -810,13 +834,70 @@ class Store:
         if knowledge_id is not None:
             knowledge = self.record(db, "knowledge", knowledge_id)
             context["knowledge"] = {"id": knowledge["id"], "version": knowledge["version"]}
+        if admin_relay:
+            context["admin_relay"] = True
+        if broadcast_id:
+            if broadcast_recipient not in MEMBERS:
+                raise RoomError("Broadcast copy requires a direct room recipient")
+            context["broadcast"] = {"id": broadcast_id, "direct_recipient": broadcast_recipient}
+        if kind == "system":
+            context["kind"] = kind
         db.execute("INSERT INTO messages(id,sender,recipient,task,body,context,status,created) VALUES (?,?,?,?,?,?,?,?)",
                    (message_id, sender, recipient, task_id, body, dumps(context), "queued", now()))
         return dict(db.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone())
 
+    def fanout(self, db, message, sender, recipient, body, task_id=None, knowledge_id=None, kind="peer"):
+        """Queue the same member message for every other room member in the caller's transaction."""
+        targets = [name for name in MEMBERS if name != sender]
+        for target in targets:
+            if target != recipient:
+                self.queue(db, sender, target, body, task_id, knowledge_id=knowledge_id, kind=kind,
+                           broadcast_id=message["id"], broadcast_recipient=recipient)
+        self.event(db, "message.broadcast", {"message": message["id"], "sender": sender, "members": targets})
+        return targets
+
+    def notify(self, db, sender, recipient, body, task_id=None, *, broadcast=True):
+        """Queue a member-triggered room notice, fanning it out unless it is transport diagnostics."""
+        message = self.queue(db, sender, recipient, body, task_id, kind="system")
+        if broadcast:
+            self.fanout(db, message, sender, recipient, body, task_id, kind="system")
+        return message
+
+    def notice(self, sender, recipient, body):
+        with self.tx() as db:
+            return self.notify(db, sender, recipient, body, broadcast=False)
+
     def send(self, actor, recipient, body, task_id=None, message_id=None, *, knowledge_id=None):
         with self.tx() as db:
-            return self.queue(db, actor, recipient, body, task_id, message_id, knowledge_id=knowledge_id)
+            existing = bool(message_id and db.execute("SELECT 1 FROM messages WHERE id=?", (message_id,)).fetchone())
+            message = self.queue(db, actor, recipient, body, task_id, message_id, knowledge_id=knowledge_id)
+            if not existing:
+                self.fanout(db, message, actor, recipient, body, task_id, knowledge_id, "task" if task_id else "peer")
+            return message
+
+    def broadcast_gateway_prompt(self, body, key):
+        """Queue gateway prompt text to every non-gateway member; its content never grants worker authority."""
+        self.main_only(GATEWAY)
+        if not isinstance(key, str) or not key:
+            raise RoomError("Admin notification requires a stable prompt key")
+        key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        targets = [name for name in MEMBERS if name != GATEWAY]
+        with self.tx() as db:
+            inserted = False
+            for target in targets:
+                child = hashlib.sha256(f"{key_hash}\0{target}".encode("utf-8")).hexdigest()[:36]
+                message_id = "M-" + child
+                inserted = inserted or not db.execute("SELECT 1 FROM messages WHERE id=?", (message_id,)).fetchone()
+                self.queue(db, GATEWAY, target, body, message_id=message_id, admin_relay=True)
+            if inserted:
+                self.event(db, "gateway.message.broadcast", {"key_hash": key_hash, "members": targets})
+            room = self.get_room(db)
+            status = room["status"]
+            member_status = {name: json.loads(db.execute("SELECT data FROM members WHERE name=?", (name,)).fetchone()[0])["status"]
+                             for name in targets}
+            eligible = [name for name in targets if name in MODES[room["mode"]]]
+        return {"members": targets, "room_status": status, "member_status": member_status,
+                "eligible_members": eligible}
 
     def knowledge_reference(self, db, context):
         """Compare a queued lesson reference with its current revision in this read."""
@@ -898,6 +979,28 @@ class Store:
             self.save_attempt(db, attempt)
             # A model can ACK before the RPC response arrives; retain that processing receipt.
             db.execute("UPDATE messages SET status=?,detail=? WHERE id=? AND status='dispatching'", (state, detail, attempt["message"]))
+
+    def activity_report(self):
+        """Read-only activity counters per member. They are not proof that a member woke, read or processed anything.
+
+        Enqueued messages, dispatch attempts/results, and processing ACKs are reported separately. Token use is not
+        available from this ledger.
+        """
+        with self.read() as db:
+            report = {}
+            for name in MEMBERS:
+                message_states = {row["status"]: row["count"] for row in db.execute(
+                    "SELECT status, count(*) AS count FROM messages WHERE recipient=? GROUP BY status", (name,))}
+                attempt_states = {}
+                for row in db.execute("SELECT data FROM attempts WHERE member=?", (name,)):
+                    state = json.loads(row[0]).get("state", "unknown")
+                    attempt_states[state] = attempt_states.get(state, 0) + 1
+                fanouts = sum(name in json.loads(row["data"]).get("members", []) for row in db.execute(
+                    "SELECT data FROM events WHERE kind IN ('message.broadcast','gateway.message.broadcast')"))
+                report[name] = {"messages_enqueued": sum(message_states.values()), "messages_by_status": message_states,
+                                "dispatch_attempts": sum(attempt_states.values()), "attempts_by_result": attempt_states,
+                                "processed_acks": message_states.get("processed", 0), "broadcasts_enqueued": fanouts}
+            return report
 
     def observe_peer_prompt(self, actor, session, message_id, sender):
         """Record prompt-text evidence for a bound session; source text does not prove peer origin."""

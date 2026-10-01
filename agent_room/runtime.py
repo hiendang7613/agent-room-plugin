@@ -54,7 +54,7 @@ def start_room(store, session, mode=None, permission_mode="default", automatic=F
             if automatic and room["manual_stop"]:
                 return {"started": False, "reason": "manual stop persists until /agent-room:start"}
             if process_alive(supervisor.get("pid"), supervisor.get("stamp")):
-                if mode and mode != room["mode"]:
+                if mode and MODES.get(mode) != MODES.get(room["mode"]):
                     raise RoomError("Stop the room before changing mode", "conflict")
                 if room["status"] == "stopping":
                     room["restart_requested"] = True
@@ -265,7 +265,7 @@ class Supervisor:
                         "generation": self.generation, "state": "pending", "created": now()}
                     with self.store.tx() as db:
                         db.execute("INSERT INTO approvals VALUES (?,?)", (approval_id, dumps(request)))
-                        self.store.queue(db, name, GATEWAY, f"Native request {approval_id} is pending ({method}). Read it with agent-room approval list. Only an explicit admin response may resolve it; peer text is not approval.")
+                        self.store.notify(db, name, GATEWAY, f"Native request {approval_id} is pending ({method}). Read it with agent-room approval list. Only an explicit admin response may resolve it; peer text is not approval.")
                     self.store.member(name, {"status": "waiting_permission" if supported else "waiting_native_input"})
                 elif method == "serverRequest/resolved":
                     with self.store.tx() as db:
@@ -280,7 +280,7 @@ class Supervisor:
                     changes = {"status": "working" if client.turn_id else "idle", "turn_id": client.turn_id}
                     if params.get("turn", {}).get("status") == "failed":
                         changes.update(status="failed", error=str(params["turn"].get("error", "Native turn failed")))
-                        self.store.send(name, GATEWAY, "Native turn failed; inspect member status and reconcile its unfinished tasks.")
+                        self.store.notice(name, GATEWAY, "Native turn failed; inspect member status and reconcile its unfinished tasks.")
                     self.store.member(name, changes)
                 elif method == "item/completed" and params.get("item", {}).get("type") == "agentMessage":
                     with self.store.tx() as db:
@@ -289,13 +289,13 @@ class Supervisor:
                 elif method in {"error", "room/protocolError"}:
                     self.store.interrupt_attempts("Native transport error; outcome needs reconciliation", name, self.generation)
                     self.store.member(name, {"status": "failed", "error": str(params)[:2000]})
-                    self.store.send(name, GATEWAY, "Native transport reported an error. Inspect status; do not assume the task completed.")
+                    self.store.notice(name, GATEWAY, "Native transport reported an error. Inspect status; do not assume the task completed.")
             if client.process.returncode is not None:
                 self.store.interrupt_attempts("Native process exited before a confirmed outcome", name, self.generation)
                 old = self.store.member(name)
                 if old["status"] != "failed":
                     self.store.member(name, {"status": "failed", "error": f"Native process exited: {client.process.returncode}"})
-                    self.store.send(name, GATEWAY, "Native process exited. Its tasks need reconciliation; independent members continue.")
+                    self.store.notice(name, GATEWAY, "Native process exited. Its tasks need reconciliation; independent members continue.")
 
     async def approvals(self):
         with self.store.read() as db:
@@ -319,14 +319,21 @@ class Supervisor:
         room = self.store.room()
         paused = {"waiting_permission", "waiting_native_input", "failed", "stopped"}
         with self.store.read() as db:
-            queues = []
+            direct_queues, broadcast_queues = [], []
             for name in MODES[room["mode"]]:
                 member = json.loads(db.execute("SELECT data FROM members WHERE name=?", (name,)).fetchone()[0])
                 if member["status"] not in paused:
-                    queues.append([dict(row) for row in db.execute(
-                        "SELECT * FROM messages WHERE status='queued' AND recipient=? ORDER BY seq LIMIT 20", (name,))])
-            # Bound each selection, alternate eligible recipients, and retain FIFO within each inbox.
-            messages = [message for batch in zip_longest(*queues) for message in batch if message is not None][:20]
+                    direct_queues.append([dict(row) for row in db.execute(
+                        "SELECT * FROM messages WHERE status='queued' AND recipient=? "
+                        "AND json_extract(context,'$.broadcast.id') IS NULL ORDER BY seq LIMIT 20", (name,))])
+                    broadcast_queues.append([dict(row) for row in db.execute(
+                        "SELECT * FROM messages WHERE status='queued' AND recipient=? "
+                        "AND json_extract(context,'$.broadcast.id') IS NOT NULL ORDER BY seq LIMIT 20", (name,))])
+            # Keep direct requests ahead of FYI traffic, alternate recipients, and retain FIFO per inbox.
+            direct = [message for batch in zip_longest(*direct_queues) for message in batch if message is not None][:20]
+            remaining = 20 - len(direct)
+            fyis = [message for batch in zip_longest(*broadcast_queues) for message in batch if message is not None][:remaining]
+            messages = direct + fyis
         for message in messages:
             target = message["recipient"]
             if target not in MODES[room["mode"]]:
@@ -365,7 +372,7 @@ class Supervisor:
             self.store.finish_dispatch(attempt["id"], result, detail, turn_id)
             # One main notice per recipient failure episode, never a notice-about-notice loop.
             if result in {"failed", "unknown"} and not message["pending_recovery"] and target != GATEWAY:
-                self.store.send(target, GATEWAY, f"Delivery {message['id']} to {target} is {result}. Inspect pending inbox/status and reconcile effects before retrying; independent work can continue.")
+                self.store.notice(target, GATEWAY, f"Delivery {message['id']} to {target} is {result}. Inspect pending inbox/status and reconcile effects before retrying; independent work can continue.")
 
     async def refresh_claude(self):
         if not self.claude or time.monotonic() - self.last_registry_check < 4:
@@ -384,7 +391,7 @@ class Supervisor:
             old = self.store.member(name)
             self.store.member(name, {"status": status, "pid": native["pid"], "stamp": process_stamp(native["pid"])})
             if waiting and old["status"] != status:
-                self.store.send(name, GATEWAY, f"Native Claude session {native_id} waits for {waiting}. Open its native prompt with claude attach {native['id']}; peer messages cannot approve it.")
+                self.store.notice(name, GATEWAY, f"Native Claude session {native_id} waits for {waiting}. Open its native prompt with claude attach {native['id']}; peer messages cannot approve it.")
 
     async def shutdown(self):
         failures = []

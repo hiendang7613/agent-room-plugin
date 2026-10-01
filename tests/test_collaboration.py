@@ -1,6 +1,7 @@
 """Room scheduling/recovery through real persistence, with native effects replaced."""
 
 from pathlib import Path
+import json
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -43,6 +44,8 @@ class CollaborationTests(unittest.IsolatedAsyncioTestCase):
         self.generation = "first-generation"
         self.set_room("running", self.generation)
         self.store.member("CLAUDE_01", {"status": "active", "native_id": "main"})
+        self.store.member("CODEX_01", {"status": "stopped"})
+        self.store.member("CLAUDE_EXPERT", {"status": "stopped"})
         self.store.member("CODEX_EXPERT", {"status": "idle", "native_id": "expert-thread"})
         self.prompt = human_receipt(self.store, "Implement work.py and have the expert review it")
         (self.project / "work.py").write_text("value = 1\n")
@@ -59,7 +62,24 @@ class CollaborationTests(unittest.IsolatedAsyncioTestCase):
 
     def messages(self):
         with self.store.read() as db:
-            return [dict(row) for row in db.execute("SELECT * FROM messages ORDER BY seq")]
+            rows = [dict(row) for row in db.execute("SELECT * FROM messages ORDER BY seq")]
+        return [row for row in rows if not json.loads(row["context"]).get("broadcast")]
+
+    def logical_message_counts(self):
+        counts = {}
+        for message in self.messages():
+            counts[message["status"]] = counts.get(message["status"], 0) + 1
+        return counts
+
+    @staticmethod
+    def direct_client_messages(client):
+        direct = []
+        for message in client.sent:
+            context = message["context"]
+            context = json.loads(context) if isinstance(context, str) else context
+            if not context.get("broadcast"):
+                direct.append(message)
+        return direct
 
     def submission(self, owner="CLAUDE_01", reviewer="CODEX_EXPERT"):
         task = self.store.create_task("CLAUDE_01", {
@@ -80,7 +100,17 @@ class CollaborationTests(unittest.IsolatedAsyncioTestCase):
         self.set_room("starting", generation)
         self.store = Store(self.project)  # Reconstruct from the SQLite ledger.
         supervisor = Supervisor(self.store, generation)
-        with patch("agent_room.runtime.CodexClient", NativeRecorder), patch.object(supervisor, "owner_alive", return_value=True):
+        async def fake_start_claude(project, native_id, resume, env, log, **kwargs):
+            return {"sessionId": native_id or "claude-fixture-session", "pid": None, "id": "claude-fixture-job"}
+
+        async def fake_stop_claude_worker(*args, **kwargs):
+            return None
+
+        with patch("agent_room.runtime.CodexClient", NativeRecorder), \
+                patch("agent_room.runtime.start_claude", fake_start_claude), \
+                patch("agent_room.runtime.exact_claude", side_effect=RoomError("No fake session", "unavailable")), \
+                patch("agent_room.runtime.stop_claude_worker", fake_stop_claude_worker), \
+                patch.object(supervisor, "owner_alive", return_value=True):
             await supervisor.launch()
         return supervisor
 
@@ -105,7 +135,7 @@ class CollaborationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(note["id"], client.sent[0]["body"])
             self.assertIn("v2", client.sent[0]["body"])
             self.assertIsNone(client.sent[0]["task"])
-            self.assertEqual(self.store.status()["message_counts"], {"processed": 1, "accepted": 1})
+            self.assertEqual(self.logical_message_counts(), {"processed": 1, "accepted": 1})
             self.store.acknowledge("CODEX_EXPERT", client.sent[0]["id"], "Read the follow-up and fixture")
             self.store.resolve_note("CODEX_EXPERT", note["id"], 2,
                 {"state": "answered", "answer": "The smaller probe distinguishes the hypotheses."})
@@ -115,7 +145,7 @@ class CollaborationTests(unittest.IsolatedAsyncioTestCase):
             await supervisor.dispatch()
         self.assertEqual((len(main_messages), len(client.sent)), (2, 1))
         self.assertEqual(self.store.status()["tasks"], [])
-        self.assertEqual(self.store.status()["message_counts"], {"processed": 2, "submitted": 1})
+        self.assertEqual(self.logical_message_counts(), {"processed": 2, "submitted": 1})
 
     async def test_dispatch_attaches_current_compact_context_and_records_its_digest(self):
         task, submission = self.submission()
@@ -131,6 +161,20 @@ class CollaborationTests(unittest.IsolatedAsyncioTestCase):
         attempts = self.store.attempts(task["id"])["items"]
         self.assertEqual(attempts[0]["context_digest"], pack["digest"])
         self.assertEqual(attempts[0]["state"], "accepted")
+
+    async def test_direct_request_is_not_buried_behind_roomwide_fyi_backlog(self):
+        self.store.member("CODEX_01", {"status": "stopped"})
+        self.store.member("CLAUDE_EXPERT", {"status": "stopped"})
+        for index in range(25):
+            self.store.send("CLAUDE_01", "CODEX_01", f"Room FYI {index}")
+        urgent = self.store.send("CLAUDE_01", "CODEX_EXPERT", "Please review the release blocker")
+        supervisor = Supervisor(self.store, self.generation)
+        client = supervisor.codex["CODEX_EXPERT"] = NativeRecorder()
+
+        await supervisor.dispatch()
+
+        self.assertEqual(client.sent[0]["id"], urgent["id"])
+        self.assertEqual([message["id"] for message in self.direct_client_messages(client)], [urgent["id"]])
 
     async def test_failed_and_unknown_delivery_flags_refresh_within_batch_and_clear_after_ack(self):
         for error, state in ((RoomError("Wrong active turn"), "failed"), (OSError("Socket closed"), "unknown")):
@@ -214,27 +258,29 @@ class CollaborationTests(unittest.IsolatedAsyncioTestCase):
         with patch("agent_room.runtime.send_claude", send_claude):
             await supervisor.dispatch()
         self.assertEqual(delivered, [healthy["id"]])
-        self.assertEqual(self.store.status()["message_counts"], {"queued": 40, "submitted": 1})
+        self.assertEqual(self.logical_message_counts(), {"queued": 40, "submitted": 1})
         self.store.member("CODEX_EXPERT", {"status": "idle"})
         client = supervisor.codex["CODEX_EXPERT"] = NativeRecorder()
         await supervisor.dispatch()
-        self.assertEqual([m["id"] for m in client.sent], [m["id"] for m in blocked])
-        self.assertEqual(self.store.status()["message_counts"], {"queued": 20, "submitted": 1, "accepted": 20})
+        self.assertEqual([m["id"] for m in self.direct_client_messages(client)], [m["id"] for m in blocked])
+        self.assertEqual(self.logical_message_counts(), {"queued": 20, "submitted": 1, "accepted": 20})
 
     async def test_dispatch_is_fair_and_fifo_with_two_busy_eligible_recipients(self):
         self.set_room("running", self.generation, "full")
         self.store.member("CODEX_01", {"status": "working"})
+        self.store.member("CLAUDE_EXPERT", {"status": "stopped"})
         clients = {name: NativeRecorder() for name in ("CODEX_01", "CODEX_EXPERT")}
         queued = {name: [self.store.send("CLAUDE_01", name, f"Finding {i}") for i in range(25)] for name in clients}
         supervisor = Supervisor(self.store, self.generation)
         supervisor.codex = clients
         await supervisor.dispatch()
         self.assertEqual([len(client.sent) for client in clients.values()], [10, 10])
-        await supervisor.dispatch()
-        await supervisor.dispatch()
+        for _ in range(4):
+            await supervisor.dispatch()
         for name, client in clients.items():
-            self.assertEqual([m["id"] for m in client.sent], [m["id"] for m in queued[name]])
-        self.assertEqual(len(self.store.attempts(limit=100)["items"]), 50)
+            self.assertEqual([m["id"] for m in self.direct_client_messages(client)], [m["id"] for m in queued[name]])
+            self.assertEqual(len(client.sent), 50)
+        self.assertEqual(len(self.store.attempts(limit=200)["items"]), 100)
 
     async def test_pending_reviewer_wakes_after_resume_without_replaying_old_attempt(self):
         task, submission = self.submission()

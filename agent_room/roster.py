@@ -11,9 +11,9 @@ here.
 ROSTER = (
     {"name": "CLAUDE_01", "alias": "CLAUDE_WORKER", "host": "claude", "role": "worker", "gateway": True, "default_mode": True,
      "model": None, "effort": None, "intended": {"model": "Sonnet 5.5", "effort": "xhigh"}},
-    {"name": "CODEX_01", "alias": "CODEX_WORKER", "host": "codex", "role": "worker", "gateway": False, "default_mode": False,
+    {"name": "CODEX_01", "alias": "CODEX_WORKER", "host": "codex", "role": "worker", "gateway": False, "default_mode": True,
      "model": None, "effort": None, "intended": {"model": "Luna 6", "effort": "xhigh"}},
-    {"name": "CLAUDE_EXPERT", "alias": None, "host": "claude", "role": "expert", "gateway": False, "default_mode": False,
+    {"name": "CLAUDE_EXPERT", "alias": None, "host": "claude", "role": "expert", "gateway": False, "default_mode": True,
      "model": None, "effort": None, "intended": {"model": "Opus 5.5", "effort": "xhigh"}},
     {"name": "CODEX_EXPERT", "alias": None, "host": "codex", "role": "expert", "gateway": False, "default_mode": True,
      "model": None, "effort": None, "intended": {"model": "Sol 6.1", "effort": "xhigh"}},

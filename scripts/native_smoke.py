@@ -31,13 +31,16 @@ def review_messages_settled(store, task_id):
     with store.read() as db:
         messages = [dict(row) for row in db.execute("SELECT * FROM messages WHERE task=? ORDER BY seq", (task_id,))]
         attempts = [json.loads(row[0]) for row in db.execute("SELECT data FROM attempts WHERE task=?", (task_id,))]
-    # Four protocol messages are expected; peers may also send a substantive
-    # handoff. Every additional message must settle before teardown as well.
+    direct_codex_ids = {message["id"] for message in messages
+                        if message["recipient"].startswith("CODEX")
+                        and not json.loads(message["context"]).get("broadcast")}
+    # FYI recipients must ACK processing; native completion is required for
+    # directly assigned Codex work, not every member awakened by its copies.
     if len(messages) < 4 or any(message["status"] != "processed" for message in messages):
         return False
     if len(attempts) != len(messages) or {a["message"] for a in attempts} != {m["id"] for m in messages}:
         return False
-    return all(attempt["processed"] and (attempt["member"] == "CLAUDE_01" or attempt["state"] == "completed")
+    return all(attempt["processed"] and (attempt["message"] not in direct_codex_ids or attempt["state"] == "completed")
                for attempt in attempts)
 
 
@@ -62,8 +65,9 @@ def main():
              "note": "Model/tool steps and token cost depend on native settings; no fixed monetary cap is promised."}
     if args.scenario == "review":
         scope.update(scenario="review", script_dispatches=2, expected_peer_dispatches=2,
-                     max_persistent_members=2, source_edits="one test-owned file written by the script; models review only",
-                     note="Two task submissions trigger two expert reviews and normally two peer notifications to main. Native tool/model turns and token cost follow current settings.")
+                     max_persistent_members=4, source_edits="one test-owned file written by the script; models review only",
+                     notification_policy="Each task/review message wakes all other members; only the named reviewer owns the review.",
+                     note="Two task submissions trigger two direct expert reviews plus room-wide FYI delivery. Claude ACKs show message processing, not native turn completion; Codex turns are checked for completion. Token cost follows current settings.")
     elif args.scenario == "learning":
         scope.update(learning_smoke.SCOPE, max_seconds=args.max_seconds, wait_timeout_seconds=args.timeout,
                      time_limit="Both clocks, checked during operations; cleanup is additional. A suspended host can stop processes only after resume.")

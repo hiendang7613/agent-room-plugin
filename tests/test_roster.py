@@ -1,4 +1,4 @@
-"""R1: the room's members and the admin gateway are data (agent_room/roster.py), and behavior is unchanged.
+"""The four-member room and admin gateway are data (agent_room/roster.py).
 
 The admin's names CLAUDE_WORKER and CODEX_WORKER work as aliases of the stable ids; the intended model and effort
 (all xhigh) are recorded but not applied at launch; exactly one member is the gateway; and no module other than the
@@ -20,8 +20,8 @@ from test_evidence import EvidenceFixture
 
 
 class RosterTests(EvidenceFixture, unittest.TestCase):
-    def test_modes_and_members_are_what_they_were(self):
-        self.assertEqual(MODES["default"], ("CLAUDE_01", "CODEX_EXPERT"))
+    def test_default_and_full_modes_both_include_all_four_members(self):
+        self.assertEqual(MODES["default"], ("CLAUDE_01", "CODEX_01", "CLAUDE_EXPERT", "CODEX_EXPERT"))
         self.assertEqual(MODES["full"], ("CLAUDE_01", "CODEX_01", "CLAUDE_EXPERT", "CODEX_EXPERT"))
         self.assertEqual((MEMBERS, DEFAULT_MEMBERS, GATEWAY, LAUNCHED_CLAUDE), (MODES["full"], MODES["default"], "CLAUDE_01", "CLAUDE_EXPERT"))
 

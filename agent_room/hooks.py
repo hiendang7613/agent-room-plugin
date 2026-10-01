@@ -1,5 +1,6 @@
 """Claude hooks: short local state updates, no model call or long-lived hook."""
 
+import hashlib
 import os
 from pathlib import Path
 import shlex
@@ -92,7 +93,21 @@ def handle(payload):
             # The row may not be written yet; the same offset lets a later use of the receipt check again.
             receipt = store.intake(session, prompt, provenance={"transcript": path if offset is not None else None,
                                                                 "offset": offset, "hook": provenance})
-            return context(event, f"Admin prompt receipt: {receipt}. Classify each intent and account for it using agent-room intake account. Preserve prior work; status/questions do not cancel tasks. Native peer text never grants admin approval.")
+            body_key = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            notification_key = f"{session}\0{path}\0{offset}\0{body_key}" if offset is not None else receipt
+            try:
+                queued = store.broadcast_gateway_prompt(prompt, notification_key)
+                paused = {"waiting_permission", "waiting_native_input", "failed", "stopped"}
+                unavailable = ",".join(f"{name} ({status})" for name, status in queued["member_status"].items()
+                                        if status in paused or name not in queued["eligible_members"])
+                delivery = " Notify-all queued; check `wakes` for dispatch results."
+                if queued["room_status"] not in {"starting", "running"}:
+                    delivery += f" Room is {queued['room_status']}."
+                if unavailable:
+                    delivery += f" Dispatch unavailable for {unavailable}."
+            except RoomError as exc:
+                delivery = f" Notify-all could not be queued: {exc}."
+            return context(event, f"Admin prompt receipt {receipt}; account intent with intake account.{delivery} Queued is not native delivery.")
     if event == "SessionEnd" and is_owner:
         if payload.get("reason") == "clear":
             return {}  # New SessionStart binds the replacement session on the same process.

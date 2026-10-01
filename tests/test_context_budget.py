@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from agent_room import hooks
 from agent_room.native import COLLABORATION_GUIDANCE, message_text, role_instructions
+from agent_room.store import MAX_MESSAGE_ID_BYTES
 from test_evidence import EvidenceFixture
 
 BUDGETS = {
@@ -37,8 +38,11 @@ class ContextBudgetTests(EvidenceFixture, unittest.TestCase):
     def measurements(self):
         body = "What evidence changes your view about the retry behavior?"
         task = self.task(review_policy="none", reviewer=None)
-        taskless = self.store.send("CODEX_EXPERT", "CLAUDE_01", body)
-        tasked = self.store.send("CLAUDE_01", "CODEX_EXPERT", body, task["id"])
+        # Longest legal addressed IDs too: the delivered header repeats the ID, so the cap must hold for the cross
+        # product of the longest ID and the longest digest, not only for generated IDs.
+        taskless = self.store.send("CODEX_EXPERT", "CLAUDE_01", body, message_id="M-" + "d" * (MAX_MESSAGE_ID_BYTES - 2))
+        tasked = self.store.send("CLAUDE_01", "CODEX_EXPERT", body, task["id"], message_id="M-" + "e" * (MAX_MESSAGE_ID_BYTES - 2))
+        self.assertEqual((len(taskless["id"]), len(tasked["id"])), (MAX_MESSAGE_ID_BYTES, MAX_MESSAGE_ID_BYTES))
         pack = self.store.task_context(task["id"], compact=True)
         pack_text = json.dumps(pack, ensure_ascii=False, separators=(",", ":"))
         with self.store.tx() as db:

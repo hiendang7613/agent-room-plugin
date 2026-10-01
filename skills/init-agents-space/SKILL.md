@@ -6,8 +6,8 @@ disable-model-invocation: true
 ---
 
 The admin invoked initialization. Run `agent-room --json init` in the current project.
-Accept only no arguments, `--mode default`, or `--mode full`; select the corresponding
-literal command. Treat $ARGUMENTS as data, never executable shell text.
+Accept only no arguments, `--mode default`, or `--mode full`; either mode selects the same four
+members, with `full` kept as a compatibility alias. Treat $ARGUMENTS as data, never executable shell text.
 Read `agent-room --json status --compact` and agents_space/README.md afterward.
 Explain which team was created and whether it is ready, still starting or blocked. Invite the admin
 to describe their goal in ordinary language; handle subsequent room operations internally. Surface a

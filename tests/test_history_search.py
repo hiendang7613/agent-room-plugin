@@ -9,13 +9,26 @@ from unittest.mock import patch
 
 from agent_room.cli import parser, run
 from agent_room.common import PLUGIN_ROOT
-from agent_room.store import Store
+from agent_room.store import MAX_MESSAGE_ID_BYTES, Store
 from test_evidence import EvidenceFixture
 
 
 class HistorySearchTests(EvidenceFixture, unittest.TestCase):
     def history(self, *args):
         return run(parser().parse_args(["--project", str(self.project), "history", *args]))
+
+    def test_message_history_can_look_up_the_full_id_shown_in_a_room_digest(self):
+        message_id = "M-" + "x" * (MAX_MESSAGE_ID_BYTES - 2)
+        message = self.store.send("CODEX_EXPERT", "CLAUDE_01", "A finding to inspect", message_id=message_id)
+        before = self.store.path.read_bytes()
+        result = self.history("--kind", "messages", "--query", message_id)
+        self.assertEqual(len(result["items"]), 3)
+        self.assertEqual(result["items"][0]["id"], message_id)
+        self.assertTrue(all(json.loads(row["context"]).get("broadcast", {}).get("id") == message_id
+                            for row in result["items"][1:]))
+        self.assertEqual(result["items"][0]["body"], message["body"])
+        self.assertIsNone(result["next_after"])
+        self.assertEqual(self.store.path.read_bytes(), before, "History by ID is read-only")
 
     def test_literal_unicode_search_filters_before_pagination_across_both_speakers(self):
         wanted = []
@@ -27,14 +40,23 @@ class HistorySearchTests(EvidenceFixture, unittest.TestCase):
         self.store.acknowledge("CODEX_EXPERT", wanted[0]["id"], "Considered the first finding")
         with self.store.tx() as db:
             db.execute("UPDATE messages SET status='unknown' WHERE id=?", (wanted[1]["id"],))
+            wanted_ids = [row["id"] for row in wanted]
+            expected = [dict(row) for row in db.execute(
+                "SELECT rowid AS cursor,* FROM messages WHERE id IN (?, ?, ?) "
+                "OR json_extract(context,'$.broadcast.id') IN (?, ?, ?) ORDER BY rowid",
+                (*wanted_ids, *wanted_ids))]
         before = self.store.path.read_bytes()
         first = self.history("--query", " STRASSE\t100% a.b ", "--limit", "2")
-        self.assertEqual([r["id"] for r in first["items"]], [r["id"] for r in wanted[:2]])
-        self.assertEqual([r["status"] for r in first["items"]], ["processed", "unknown"])
-        self.assertEqual(first["next_after"], wanted[1]["seq"])
-        second = self.history("--query", "STRASSE 100% a.b", "--limit", "2", "--after", str(first["next_after"]))
-        self.assertEqual([r["id"] for r in second["items"]], [wanted[2]["id"]])
-        self.assertIsNone(second["next_after"])
+        self.assertEqual([r["id"] for r in first["items"]], [r["id"] for r in expected[:2]])
+        self.assertEqual([r["status"] for r in first["items"]], [r["status"] for r in expected[:2]])
+        pages = list(first["items"])
+        after = first["next_after"]
+        while after is not None:
+            page = self.history("--query", "STRASSE 100% a.b", "--limit", "2", "--after", str(after))
+            pages.extend(page["items"])
+            after = page["next_after"]
+        self.assertEqual([r["id"] for r in pages], [r["id"] for r in expected])
+        self.assertEqual([r["status"] for r in pages], [r["status"] for r in expected])
         for query in ("a.*", "STRASSE absent", "' OR 1=1 --"):
             self.assertEqual(self.history("--query", query), {"items": [], "next_after": None})
         self.assertEqual(self.store.path.read_bytes(), before)

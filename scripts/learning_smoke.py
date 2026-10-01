@@ -20,7 +20,9 @@ CASES = {
 }
 SCOPE = {
     "scenario": "learning", "script_dispatches": 3, "expected_peer_dispatches": 3,
-    "max_persistent_members": 2, "max_room_messages": 6, "restarts": 1,
+    "max_persistent_members": 4, "max_room_messages": 18, "restarts": 1,
+    "logical_message_count": 6, "recipient_delivery_count": 18,
+    "notification_policy": "Every logical member message also queues FYI deliveries to all other members",
     "source_edits": "Script-owned fixture JSON only; models may write shared knowledge and peer replies, not source or settings",
     "retries": 0, "model_selection": "Existing native configuration; no override",
     "note": "Guided mechanism pilot, not autonomous-learning or memory-benefit benchmark. Model/tool steps and cost follow native settings; message/time bounds are not token or monetary caps.",
@@ -172,7 +174,7 @@ def run(store, command, wait, report):
             report["learning"]["resumed_native_id"] = native_id
     with store.read() as db:
         messages = [dict(row) for row in db.execute("SELECT id,sender,recipient,status FROM messages")]
-        if len(messages) != 6 or any(message["status"] != "processed" for message in messages):
+        if len(messages) != SCOPE["recipient_delivery_count"] or any(message["status"] != "processed" for message in messages):
             raise RuntimeError("Learning pilot left extra or unprocessed messages")
         if any(db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() for table in ("tasks", "notes", "approvals")):
             raise RuntimeError("Learning pilot changed task, decision or approval state")

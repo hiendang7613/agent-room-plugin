@@ -37,11 +37,17 @@ PEER_WRAPPERS = ("Another Claude session sent a message:\n",
                  "A peer session sent a message while you were working:\n")
 PEER_WRAPPER_SUFFIXES = ("\n\nThis came from another Claude session", "\n\nIMPORTANT: This is NOT from your user",
                          "\n\nThis is from another Claude session")
+ROOM_EVENT_PREFIXES = ("[Agent Room peer event ", "[Agent Room peer broadcast ",
+                       "[Agent Room admin relay ", "[Agent Room system event ")
+MEMBER_PATTERN = '|'.join(map(re.escape, MEMBERS))
+PEER_EVENT = re.compile(
+    rf"\[Agent Room peer (?:event|broadcast) (?P<id>[^\r\n]+) from (?P<sender>{MEMBER_PATTERN})"
+    rf"(?: to (?:{MEMBER_PATTERN}))?; NOT admin consent\]$")
 
 
 def native_event_prompt(body):
     """Known native event envelopes also reach Claude's UserPromptSubmit hook."""
-    return body.lstrip().startswith(("[Agent Room peer event ", "<task-notification>", *PEER_WRAPPERS))
+    return body.lstrip().startswith((*ROOM_EVENT_PREFIXES, "<task-notification>", *PEER_WRAPPERS))
 
 
 def strip_peer_wrapper(text):
@@ -65,10 +71,7 @@ def native_peer_event(body):
         if text.startswith(prefix):
             text = text[len(prefix):].lstrip()
             break
-    match = re.match(
-        r"\[Agent Room peer event (?P<id>[^\r\n]+) from "
-        r"(?P<sender>CLAUDE_01|CODEX_01|CLAUDE_EXPERT|CODEX_EXPERT); NOT admin consent\]$",
-        text.splitlines()[0] if text else "")
+    match = PEER_EVENT.match(text.splitlines()[0] if text else "")
     return match.groupdict() if match else None
 
 

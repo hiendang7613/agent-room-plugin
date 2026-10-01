@@ -117,8 +117,10 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT body FROM messages WHERE id=?", (sent["id"],)).fetchone()[0], body)
         self.wait(lambda: self.effects("peer_cli"))
         self.assertEqual(self.effects("peer_cli")[0]["data"]["returncode"], 0)
-        self.wait(lambda: self.effects("claude_inbox"))
-        packet = self.effects("claude_inbox")[0]["data"]
+        self.wait(lambda: any(effect["data"].get("from") == "CODEX_EXPERT"
+                               for effect in self.effects("claude_inbox")))
+        packet = next(effect["data"] for effect in self.effects("claude_inbox")
+                      if effect["data"].get("from") == "CODEX_EXPERT")
         self.assertEqual(packet["from"], "CODEX_EXPERT")
         self.assertEqual(packet["session_id"], self.session)
         self.assertIn("NOT admin consent", packet["message"]["content"])
@@ -143,7 +145,11 @@ class RuntimeTests(unittest.TestCase):
             self.assertIn("Work as proactive peers", guidance)
             self.assertIn("Discussion needs no task or format", guidance)
             self.assertIn("only main records them against the original receipt", guidance)
-            self.assertIn("agent-room guide", guidance)
+            # The guide pointer left the role text (O3 byte cut) and lives in the README that every member is told to read at start.
+            self.assertIn("read agents_space/README.md", guidance)
+            readme = (PLUGIN_ROOT / "templates/README.md").read_text(encoding="utf-8")
+            self.assertIn("`agent-room guide`", readme)
+            self.assertIn("`--help`", readme)
 
     def test_shared_lesson_revision_reaches_both_native_transports(self):
         knowledge = Knowledge(self.store)
@@ -231,7 +237,7 @@ class RuntimeTests(unittest.TestCase):
     def test_review_smoke_waits_for_all_messages_and_native_completion(self):
         exit_code, report = self.review_smoke_fixture(acknowledge=True)
         self.assertEqual((exit_code, report["status"]), (0, "passed"), report)
-        self.assertEqual(report["final_status"]["message_counts"], {"processed": 4})
+        self.assertEqual(report["final_status"]["message_counts"], {"processed": 12})
         attempts = report["attempts_before_restart"]
         self.assertEqual([a["state"] for a in attempts if a["member"] == "CODEX_EXPERT"], ["completed", "completed"])
         self.assertTrue(all(a["processed"] for a in attempts))
@@ -242,7 +248,7 @@ class RuntimeTests(unittest.TestCase):
     def test_review_smoke_allows_processed_substantive_peer_handoff(self):
         exit_code, report = self.review_smoke_fixture(acknowledge=True, extra_peer_handoff=True)
         self.assertEqual((exit_code, report["status"]), (0, "passed"), report)
-        self.assertEqual(report["final_status"]["message_counts"], {"processed": 5})
+        self.assertEqual(report["final_status"]["message_counts"], {"processed": 15})
         self.assertEqual(len(report["submissions"]), 2)
         self.assertTrue(all(a["processed"] for a in report["attempts_before_restart"]))
         self.assertFalse(report["final_status"]["supervisor_alive"])
@@ -328,7 +334,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual([p["knowledge"]["version"] for p in phases], [1, 1, 2])
         self.assertEqual(phases[1]["result"]["delay_seconds"], 1.75)
         self.assertEqual(phases[2]["result"]["delay_seconds"], 2)
-        self.assertEqual(report["final_status"]["message_counts"], {"processed": 6})
+        self.assertEqual(report["final_status"]["message_counts"], {"processed": 18})
         self.assertTrue(report["cleanup"]["confirmed"])
         self.assertEqual(len(report["retained_learning_state"]["revisions"]), 2)
         self.assertIn("resources/collaboration-guidance.md", report["source_sha256"])
@@ -345,7 +351,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(exit_code, 1, report)
         self.assertIn("Incorrect retry delay", report["error"])
         self.assertEqual(len(report["messages"]), 2)
-        self.assertEqual(len(report["retained_learning_state"]["messages"]), 4)
+        self.assertEqual(len(report["retained_learning_state"]["messages"]), 12)
         self.assertTrue(report["cleanup"]["confirmed"])
 
     def test_learning_smoke_total_timeout_cleans_up(self):
@@ -391,11 +397,13 @@ class RuntimeTests(unittest.TestCase):
         self.wait(lambda: self.store.status()["approvals"][0]["state"] == "resolved")
         self.assertEqual(len(self.effects("approved_effect")), 1)
 
-    def test_full_mode_shutdown_and_live_mode_conflict(self):
+    def test_default_and_full_are_four_member_compatibility_modes(self):
         self.start("full")
         workers = [m for m in self.store.status()["members"] if m["name"] != "CLAUDE_01"]
         self.assertTrue(all(m["native_id"] and m["pid"] for m in workers))
-        self.call("start", "--mode", "default", ok=False)
+        already_running = self.call("start", "--mode", "default")
+        self.assertFalse(already_running["started"])
+        self.assertEqual(already_running["reason"], "supervisor already running")
         self.call("send", "--to", "CLAUDE_EXPERT", input="Review the shared contract")
         self.wait(lambda: self.effects("claude_inbox"))
         self.assertEqual(self.effects("claude_inbox")[-1]["member"], "CLAUDE_EXPERT")
@@ -408,10 +416,10 @@ class RuntimeTests(unittest.TestCase):
         task = self.store.create_task("CLAUDE_01", {"title": "Pending review", "request": "Inspect scope", "acceptance": "Evidence recorded", "next": "Inspect",
             "owner": "CLAUDE_01", "source": receipt, "review_policy": "peer_required", "reviewer": "CLAUDE_EXPERT"})
         self.call("stop")
-        self.call("start", "--mode", "default", ok=False)
-        self.store.update_task("CLAUDE_01", task["id"], task["version"], {"reviewer": "CODEX_EXPERT", "source": receipt})
-        self.start("default")
-        self.assertEqual(self.store.member("CLAUDE_EXPERT")["status"], "stopped")
+        self.call("start", "--mode", "default")
+        self.wait(lambda: self.store.room()["status"] == "running")
+        self.assertEqual(self.store.room()["mode"], "default")
+        self.assertEqual(self.store.member(task["reviewer"])["status"], "idle")
 
     def test_owner_exit_stops_workers_but_does_not_set_manual_stop(self):
         self.start()

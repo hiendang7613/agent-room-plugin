@@ -26,9 +26,12 @@ Reopen Claude Code in the project, then:
 /init-agents-space
 ```
 
-Default: CLAUDE_01 + CODEX_EXPERT. For a new full room, use `/init-agents-space --mode full`:
-CLAUDE_01, CODEX_01, CLAUDE_EXPERT, CODEX_EXPERT. If the bare alias conflicts with an existing skill,
-use `/agent-room:init-agents-space`. Existing project files and custom room guides are preserved.
+Every new room has four members: CLAUDE_01, CODEX_01, CLAUDE_EXPERT, CODEX_EXPERT. `--mode full`
+remains a compatibility alias for the same roster. Every room message queues a copy for the other
+members; broadcast copies are FYI, and only the direct addressee owns the request/task. The supervisor
+tries delivery as soon as its queue is available. A stopped/paused member keeps its queued messages.
+If the bare alias conflicts with an existing skill, use `/agent-room:init-agents-space`. Existing
+project files and custom room guides are preserved.
 
 Continue talking to main: give a goal, ask for a simpler approach, request status or say "continue".
 Main handles task scope, claims, peer requests, reviews and knowledge internally. Ordinary peer
