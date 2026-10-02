@@ -14,8 +14,8 @@
     {
       "name": "i-have-asd-ste100",
       "source": {
-        "source": "github",
-        "repo": "hiendang7613/i-have-asd-ste100"
+        "source": "url",
+        "url": "https://github.com/hiendang7613/i-have-asd-ste100.git"
       },
       "description": "Short, predictable replies in any language; installed with Agent Room"
     }
