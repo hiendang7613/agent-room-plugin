@@ -38,6 +38,7 @@ read the task and its dependencies before starting. A dependency need not be app
     agent-room task show T-ID
     agent-room task claim T-ID --expected-version 1
 
+For a task you create for yourself, `task create --claim --input task.json` creates it and claims its explicit implementation scope in one transaction. It is rejected unless you are the owner, authority is `implementation`, and scope is nonempty; an overlap or dependency error rolls back creation. Assigned work still uses `task claim` after reading the current task.
 Claim returns a token and current task version. Keep it for `task release T-ID --token TOKEN`.
 `task update T-ID --expected-version N --input -` accepts state, checkpoint, next, evidence,
 snapshot and blocked_reason. Only main may also change owner/scope/authority/request/acceptance with
@@ -45,8 +46,22 @@ a fresh source receipt. Read before updating after a version conflict. Do not bl
 States: ready, running, blocked, review, done, cancelled. Evidence is required for done.
 Use `snapshot path/to/file ...` to capture source hashes; pass its data object as snapshot with a review.
 
+When a successful `task update`, `task submit` or `review record` is also processing a pending direct
+message for that same task, add `--ack M-ID` to the same command. The action and ACK commit together;
+on a version, authority, task-binding or ACK error both remain unchanged. This cannot ACK FYI copies,
+another member's message, a different task or an already processed message. Use it only after reading
+the full message; otherwise use standalone `ack` with specific evidence.
+
+```text
+agent-room task create --claim --input task.json
+agent-room task update T-ID --expected-version N --ack M-ID --input update.json
+agent-room task submit T-ID --expected-version N --ack M-ID --input submission.json
+agent-room review record S-ID --ack M-ID --input review.json
+```
+
 Schema 2: set review_policy and reviewer on tasks requiring peer review, then use `task submit`,
-`review record`, `task checkpoint` and `task context`. See [evidence guide](evidence.md) for JSON contracts.
+`review record`, `task checkpoint` and `task context`. `task submit` and `review record` accept the
+same related-message `--ack M-ID` option. See [evidence guide](evidence.md) for JSON contracts.
 The legacy optional snapshot alone does not satisfy peer_required completion.
 
 ## Read advisory attention
@@ -59,11 +74,13 @@ Blockers show explicit blocked reasons, unfinished dependencies and unsatisfied 
 The view is recomputed on read and changes no task, message, permission or native process.
 Existing claim and permission checks still apply. Members decide whether and when to respond.
 
-Status also includes `pending_inboxes.by_member`, a small read-only count of each member's messages
-that lack a processing ACK, grouped by transport state. It includes queued, submitted, accepted,
-failed and unknown messages; only `processed` is excluded. Use the supplied `read_command` while
-bound as that member to read every pending page from `--after 0`. These counts do not prove receipt,
-send a reminder, retry delivery or create a task.
+Status includes `pending_inboxes.by_member`, a read-only count of actionable messages without a
+processing ACK. `inbox --pending` returns those direct messages; FYI broadcast copies and admin
+relays remain in inbox history without creating ACK work. Status keeps their delivery failures in
+`incomplete_notifications`, grouped by the originating message/receipt and recipient. A queued,
+accepted or submitted state describes transport only; it does not prove that a member read or
+processed the message. Use the supplied `read_command` for every pending page. These views do not
+send reminders, retry delivery or create tasks.
 
 ## Questions and decisions
 
@@ -101,10 +118,10 @@ Use any active member as the recipient. `--task` is optional for natural questio
     agent-room inbox --pending --after 0 --limit 50
     agent-room ack M-ID --evidence 'Reviewed current task and saved findings in reviews/topic.md'
 
-Native delivery already includes the current message and, for task work, a compact task snapshot. Use that
-context for a fresh event instead of rescanning unrelated status and inbox records. Refresh task context
-when a delivery may be stale, before changing task ownership/scope, or before retrying uncertain work; verify
-the source digest before a source-bound review.
+Native delivery already includes the current message and a compact task snapshot. Assigned review requests
+carry a source-bound packet with paths and bounded previews of author evidence; treat those claims as leads,
+inspect the actual files and verify the packet digest. Read full records when its status is stale/truncated or
+required paths/acceptance are truncated. Only the assigned reviewer records; do not update or checkpoint the task.
 
 After resume, a delivery gap, or when catching up on older messages, read current status and every pending
 inbox page. Read next_after until null. Start each fresh sweep at `--after 0` so older unresolved messages

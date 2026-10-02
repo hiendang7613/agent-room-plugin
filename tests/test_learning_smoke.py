@@ -12,7 +12,7 @@ from agent_room.common import PLUGIN_ROOT
 from agent_room.knowledge import Knowledge
 from agent_room.scaffold import initialize
 from agent_room.store import Store
-from scripts.learning_smoke import Deadline, PREFIX, prompt, result
+from scripts.learning_smoke import Deadline, PREFIX, delivery_settled, prompt, result
 
 
 class LearningGraderTests(unittest.TestCase):
@@ -30,6 +30,18 @@ class LearningGraderTests(unittest.TestCase):
         self.original = self.knowledge.write("CODEX_EXPERT", {
             "title": "Retry delay", "body": "Observed implicit unit is milliseconds",
             "evidence": ["Synthetic pilot outcomes"], "limits": "Only the observed protocol"})
+
+    def test_delivery_settlement_requires_processing_for_work_but_not_fyi(self):
+        for context in ({"broadcast": {"id": "M-copy"}}, {"admin_relay": True}):
+            with self.subTest(context=context):
+                for status in ("accepted", "submitted", "processed"):
+                    self.assertTrue(delivery_settled(status, context))
+                for status in ("queued", "failed", "unknown"):
+                    self.assertFalse(delivery_settled(status, context))
+
+        actionable = {}
+        self.assertFalse(delivery_settled("accepted", actionable))
+        self.assertTrue(delivery_settled("processed", actionable))
 
     def process(self, message, ack=True, complete=True):
         attempt = self.store.begin_attempt(message, "fixture")

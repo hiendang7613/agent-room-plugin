@@ -12,9 +12,83 @@ from agent_room.cli import parser, run
 from agent_room.common import PLUGIN_ROOT
 from agent_room.scaffold import initialize
 from agent_room.store import Store
+from receipts import human_receipt
 
 
 class CLITests(unittest.TestCase):
+    def test_task_create_claim_and_related_ack_are_available_in_one_cli_call_each(self):
+        with tempfile.TemporaryDirectory() as directory:
+            initialize(Path(directory))
+            store = Store(directory)
+            session = "fixture-main"
+            with store.tx() as db:
+                room = store.get_room(db)
+                room.update(status="running", owner={"session": session})
+                store.put_room(db, room)
+            prompt = human_receipt(store, "Implement the scoped task and process its related message", session=session)
+            env = dict(os.environ, AGENT_ROOM_MEMBER="CLAUDE_01", AGENT_ROOM_SESSION_ID=session)
+            task_input = json.dumps({
+                "title": "Implement A", "request": "Change src/a.py", "acceptance": "Check succeeds",
+                "next": "Inspect the file", "owner": "CLAUDE_01", "source": prompt,
+                "authority": "implementation", "scope": ["src/a.py"]})
+            with patch.dict(os.environ, env):
+                created = run(parser().parse_args([
+                    "--project", directory, "task", "create", "--claim", "--input", task_input]))
+            self.assertEqual(created["task"]["state"], "running")
+            self.assertEqual(created["claim"]["task"], created["task"]["id"])
+
+            message = store.send("CODEX_EXPERT", "CLAUDE_01", "Use the current acceptance", created["task"]["id"])
+            with patch.dict(os.environ, env):
+                updated = run(parser().parse_args([
+                    "--project", directory, "task", "update", created["task"]["id"],
+                    "--expected-version", str(created["task"]["version"]), "--ack", message["id"],
+                    "--input", json.dumps({"checkpoint": "Read and applied the message"})]))
+            self.assertEqual(updated["processed_message"], message["id"])
+            self.assertEqual(store.inbox("CLAUDE_01", pending=True)["items"], [])
+
+    def test_task_submit_and_review_ack_are_wired_through_the_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            initialize(Path(directory))
+            project = Path(directory)
+            (project / "work.py").write_text("value = 1\n")
+            store = Store(directory)
+            main_session = "fixture-main"
+            with store.tx() as db:
+                room = store.get_room(db)
+                room.update(status="running", mode="full", owner={"session": main_session})
+                store.put_room(db, room)
+            prompt = human_receipt(store, "Implement work.py and submit it for expert review", session=main_session)
+            task = store.create_task("CLAUDE_01", {
+                "title": "Implement work", "request": "Change work.py", "acceptance": "Value remains one",
+                "next": "Inspect work.py", "owner": "CLAUDE_01", "source": prompt,
+                "authority": "implementation", "scope": ["work.py"],
+                "review_policy": "peer_required", "reviewer": "CODEX_EXPERT"})
+            submit_message = store.send("CODEX_01", "CLAUDE_01", "Use the current acceptance", task["id"])
+            main_env = dict(os.environ, AGENT_ROOM_MEMBER="CLAUDE_01", AGENT_ROOM_SESSION_ID=main_session)
+            with patch.dict(os.environ, main_env):
+                submission_result = run(parser().parse_args([
+                    "--project", directory, "task", "submit", task["id"], "--expected-version", str(task["version"]),
+                    "--ack", submit_message["id"], "--input", json.dumps({
+                        "paths": ["work.py"], "evidence": ["python check verified value=1"],
+                        "summary": "Implementation ready for independent review"})]))
+            self.assertEqual(submission_result["processed_message"], submit_message["id"])
+            submission = submission_result["submission"]
+
+            review_message = store.send("CLAUDE_01", "CODEX_EXPERT", "Review the submitted source and acceptance", task["id"])
+            reviewer_binding = "fixture-reviewer-binding"
+            store.member("CODEX_EXPERT", {"token_hash": hashlib.sha256(reviewer_binding.encode()).hexdigest()})
+            review_env = dict(os.environ, AGENT_ROOM_MEMBER="CODEX_EXPERT", AGENT_ROOM_SESSION_ID="fixture-reviewer",
+                              AGENT_ROOM_BINDING=reviewer_binding)
+            with patch.dict(os.environ, review_env):
+                review_result = run(parser().parse_args([
+                    "--project", directory, "review", "record", submission["id"], "--ack", review_message["id"],
+                    "--input", json.dumps({
+                        "source_digest": submission["digest"], "verdict": "approve", "findings": [],
+                        "summary": "Inspected the submitted source", "evidence": ["Read work.py; value equals one"]})]))
+            self.assertEqual(review_result["processed_message"], review_message["id"])
+            statuses = {row["id"]: row["status"] for row in store.inbox("CODEX_EXPERT")["items"]}
+            self.assertEqual(statuses[review_message["id"]], "processed")
+
     def test_compact_inbox_pointer_reads_exact_full_message_after_ack(self):
         with tempfile.TemporaryDirectory() as directory:
             initialize(Path(directory))

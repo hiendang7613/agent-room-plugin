@@ -11,7 +11,7 @@ from agent_room.common import RoomError
 from agent_room.native import message_text
 from agent_room.runtime import Supervisor
 from agent_room.scaffold import initialize
-from agent_room.store import Store
+from agent_room.store import MAX_REVIEW_PACKET_BYTES, Store
 from receipts import human_receipt
 
 
@@ -155,12 +155,53 @@ class CollaborationTests(unittest.IsolatedAsyncioTestCase):
         await supervisor.dispatch()
         self.assertEqual(len(client.sent), 1)
         pack = client.sent[0]["context_pack"]
-        self.assertEqual(pack["detail"], "summary")
-        self.assertEqual(pack["review"]["submission"], submission["id"])
+        self.assertEqual(pack["status"], "current")
+        self.assertEqual(pack["submission"]["id"], submission["id"])
         self.assertEqual(pack["task"]["version"], self.current(task)["version"])
         attempts = self.store.attempts(task["id"])["items"]
         self.assertEqual(attempts[0]["context_digest"], pack["digest"])
         self.assertEqual(attempts[0]["state"], "accepted")
+
+    async def test_review_packet_is_submission_bound_and_only_sent_to_assigned_reviewer(self):
+        task, submission = self.submission()
+        with self.store.read() as db:
+            messages = [dict(row) for row in db.execute("SELECT * FROM messages WHERE task=? ORDER BY seq", (task["id"],))]
+        self.assertEqual({message["recipient"] for message in messages}, {"CODEX_01", "CLAUDE_EXPERT", "CODEX_EXPERT"})
+        for message in messages:
+            context = json.loads(message["context"])
+            self.assertEqual(context["review_submission"], submission["id"])
+            self.assertEqual("broadcast" in context, message["recipient"] != "CODEX_EXPERT")
+
+        packet = self.store.review_packet(task["id"], submission["id"])
+        self.assertEqual(packet["status"], "current")
+        self.assertEqual(packet["submission"]["source_digest"], submission["digest"])
+        self.assertEqual(packet["submission"]["paths"], ["work.py"])
+        self.assertEqual(packet["submission"]["author_evidence_preview"], ["Value checked"])
+        self.assertEqual(packet["submission"]["evidence_count"], 1)
+        self.assertFalse(packet["submission"]["author_evidence_preview_truncated"])
+        self.assertEqual(packet["task"]["acceptance"], "Value is 1")
+        self.assertNotIn("summary", packet["submission"], "Do not lead reviewers with the author's conclusion")
+        self.assertLessEqual(len(json.dumps(packet, ensure_ascii=False, separators=(",", ":")).encode()),
+                             MAX_REVIEW_PACKET_BYTES)
+
+        self.store.member("CODEX_01", {"status": "idle"})
+        self.store.member("CLAUDE_EXPERT", {"status": "idle"})
+        supervisor = Supervisor(self.store, self.generation)
+        direct_reviewer = supervisor.codex["CODEX_EXPERT"] = NativeRecorder()
+        copied_codex = supervisor.codex["CODEX_01"] = NativeRecorder()
+        copied_claude = []
+        with patch("agent_room.runtime.send_claude", lambda *args: copied_claude.append(args[2]) or "submitted"):
+            await supervisor.dispatch()
+
+        self.assertEqual(len(direct_reviewer.sent), 1)
+        self.assertEqual(direct_reviewer.sent[0]["context_pack"]["submission"]["id"], submission["id"])
+        review_text = message_text(direct_reviewer.sent[0])
+        self.assertIn("evidence are author claims", review_text)
+        self.assertIn("author_evidence_preview", review_text)
+        self.assertEqual(len(copied_codex.sent), 1)
+        self.assertNotIn("context_pack", copied_codex.sent[0])
+        self.assertEqual(len(copied_claude), 1)
+        self.assertNotIn("context_pack", copied_claude[0])
 
     async def test_direct_request_is_not_buried_behind_roomwide_fyi_backlog(self):
         self.store.member("CODEX_01", {"status": "stopped"})

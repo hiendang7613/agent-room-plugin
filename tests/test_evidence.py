@@ -10,7 +10,7 @@ from unittest.mock import patch
 from agent_room.common import RoomError, dumps, process_stamp
 from agent_room.schema import EXTENSIONS, migrate
 from agent_room.scaffold import initialize
-from agent_room.store import Store
+from agent_room.store import MAX_REVIEW_PACKET_BYTES, Store
 from receipts import human_receipt
 
 
@@ -76,6 +76,172 @@ class EvidenceTests(EvidenceFixture, unittest.TestCase):
         with self.assertRaises(RoomError):
             self.review(submission, source_digest="an old digest")
         self.assertEqual(self.store.status()["tasks"][0]["review_status"]["state"], "pending")
+
+    def test_submit_ack_is_committed_with_the_same_task_submission(self):
+        task = self.task()
+        message = self.store.send("CODEX_EXPERT", "CLAUDE_01", "Use the current acceptance for this task", task["id"])
+        current = self.current(task)
+        result = self.store.submit_task(current["owner"], current["id"], current["version"], {
+            "paths": ["work.py"], "evidence": ["python check verified value=1"],
+            "summary": "Implementation ready"}, ack_id=message["id"])
+        self.assertEqual(result["processed_message"], message["id"])
+        self.assertEqual(self.current(task)["submission"], result["submission"]["id"])
+        self.assertEqual(self.store.inbox("CLAUDE_01", pending=True)["items"], [])
+
+    def test_submit_with_invalid_fyi_ack_rolls_back_submission_and_notices(self):
+        task = self.task()
+        self.store.send("CODEX_EXPERT", "CODEX_01", "FYI from another reviewer", task["id"])
+        copied = next(row for row in self.store.inbox("CLAUDE_01")["items"]
+                      if row["context"].get("broadcast"))
+        self.assertEqual(copied["recipient"], "CLAUDE_01")
+        current = self.current(task)
+        with self.store.read() as db:
+            counts_before = {
+                "submissions": db.execute("SELECT count(*) FROM submissions").fetchone()[0],
+                "messages": db.execute("SELECT count(*) FROM messages").fetchone()[0],
+                "events": db.execute("SELECT count(*) FROM events").fetchone()[0],
+            }
+
+        with self.assertRaises(RoomError):
+            self.store.submit_task(current["owner"], current["id"], current["version"], {
+                "paths": ["work.py"], "evidence": ["python check verified value=1"],
+                "summary": "Implementation ready"}, ack_id=copied["id"])
+
+        with self.store.read() as db:
+            counts_after = {
+                "submissions": db.execute("SELECT count(*) FROM submissions").fetchone()[0],
+                "messages": db.execute("SELECT count(*) FROM messages").fetchone()[0],
+                "events": db.execute("SELECT count(*) FROM events").fetchone()[0],
+            }
+        after = self.current(task)
+        self.assertEqual(counts_after, counts_before)
+        self.assertEqual(after["submission"], current["submission"])
+        self.assertEqual(after["state"], current["state"])
+        self.assertEqual(after["version"], current["version"])
+
+    def test_review_ack_is_same_task_bound_and_rolls_back_a_new_review_on_mismatch(self):
+        task = self.task()
+        submission = self.submit(task)
+        review_request = next(row for row in self.store.inbox("CODEX_EXPERT", pending=True)["items"]
+                              if row["context"].get("review_submission") == submission["id"])
+        other = self.task(scope=["other.py"])
+        wrong_task_message = self.store.send("CLAUDE_01", "CODEX_EXPERT", "A different task update", other["id"])
+        data = {"source_digest": submission["digest"], "verdict": "approve", "findings": [],
+                "summary": "Inspected source and acceptance", "evidence": ["Read work.py; value equals 1"]}
+
+        with self.assertRaises(RoomError) as caught:
+            self.store.record_review("CODEX_EXPERT", submission["id"], data, ack_id=wrong_task_message["id"])
+        self.assertEqual(caught.exception.code, "conflict")
+        current_status = next(row for row in self.store.status()["tasks"] if row["id"] == task["id"])
+        self.assertEqual(current_status["review_status"]["state"], "pending")
+        self.assertIn(wrong_task_message["id"], [row["id"] for row in self.store.inbox("CODEX_EXPERT", pending=True)["items"]])
+
+        receipt = self.store.record_review("CODEX_EXPERT", submission["id"], data, ack_id=review_request["id"])
+        self.assertEqual(receipt["processed_message"], review_request["id"])
+        self.assertEqual([row["id"] for row in self.store.inbox("CODEX_EXPERT", pending=True)["items"]],
+                         [wrong_task_message["id"]])
+        repeated = self.store.record_review("CODEX_EXPERT", submission["id"], data, ack_id=review_request["id"])
+        self.assertEqual(repeated["id"], receipt["id"])
+        self.assertEqual(repeated["processed_message"], review_request["id"])
+        with self.store.read() as db:
+            review_count = db.execute("SELECT count(*) FROM reviews WHERE submission=?", (submission["id"],)).fetchone()[0]
+        self.assertEqual(review_count, 1)
+
+    def test_review_packet_truncates_explicitly_and_stale_source_fails_closed(self):
+        task = self.task()
+        task = self.current(task)
+        evidence = ["counterexample " * 8 for _ in range(12)]
+        submission = self.store.submit_task(task["owner"], task["id"], task["version"], {
+            "paths": ["work.py"], "evidence": evidence, "summary": "Long evidence fixture"})["submission"]
+        packet = self.store.review_packet(task["id"], submission["id"])
+        encoded = dumps(packet).encode("utf-8")
+        self.assertLessEqual(len(encoded), MAX_REVIEW_PACKET_BYTES)
+        self.assertEqual(packet["status"], "truncated")
+        self.assertTrue(packet["truncated"])
+        self.assertEqual(packet["submission"]["source_digest"], submission["digest"])
+        self.assertIn(f"agent-room submission show {submission['id']}", packet["full_record_commands"])
+
+        self.source.write_text("value = 2\n")
+        stale = self.store.review_packet(task["id"], submission["id"])
+        self.assertEqual(stale["status"], "stale")
+        self.assertTrue(stale["truncated"])
+        self.assertLessEqual(len(dumps(stale).encode("utf-8")), MAX_REVIEW_PACKET_BYTES)
+
+    def test_review_packet_preserves_paths_with_long_evidence_claims(self):
+        paths = ["work.py", "src/worker.py", "tests/test_worker.py"]
+        (self.project / "src").mkdir()
+        (self.project / "tests").mkdir()
+        (self.project / "src/worker.py").write_text("value = 1\n")
+        (self.project / "tests/test_worker.py").write_text("assert 1 == 1\n")
+        task = self.task(scope=paths, acceptance="The worker returns the expected value and tests cover the edge cases." * 2)
+        task = self.current(task)
+        evidence = [f"Check {index}: " + ("verified output and boundary behavior; " * 7) for index in range(8)]
+        submission = self.store.submit_task(task["owner"], task["id"], task["version"], {
+            "paths": paths, "evidence": evidence, "summary": "Ready for independent review"})["submission"]
+
+        packet = self.store.review_packet(task["id"], submission["id"])
+        encoded = dumps(packet).encode("utf-8")
+        self.assertEqual(packet["status"], "current")
+        self.assertFalse(packet.get("truncated", False))
+        self.assertEqual(packet["submission"]["paths"], sorted(paths))
+        self.assertEqual(packet["submission"]["evidence_count"], len(evidence))
+        self.assertEqual(len(packet["submission"]["author_evidence_preview"]), len(evidence))
+        self.assertTrue(packet["submission"]["author_evidence_preview"][0].endswith("..."))
+        self.assertTrue(packet["submission"]["author_evidence_preview_truncated"])
+        self.assertNotIn("full_record_commands", packet,
+                         "An excerpted author claim alone does not force a full-record read")
+        self.assertEqual(packet["submission"]["source_digest"], submission["digest"])
+        self.assertLessEqual(len(encoded), MAX_REVIEW_PACKET_BYTES)
+        self.assertNotIn("record_command", packet)
+        self.assertNotIn("rule", packet)
+
+    def test_review_packet_marks_in_cap_path_truncation(self):
+        paths = [f"src/{index}.py" for index in range(13)]
+        (self.project / "src").mkdir()
+        for path in paths:
+            (self.project / path).write_text("value = 1\n")
+        task = self.task(scope=paths)
+        task = self.current(task)
+        submission = self.store.submit_task(task["owner"], task["id"], task["version"], {
+            "paths": paths, "evidence": ["Checked source"], "summary": "Ready"})["submission"]
+
+        packet = self.store.review_packet(task["id"], submission["id"])
+        self.assertEqual(packet["status"], "current")
+        self.assertTrue(packet["truncated"])
+        self.assertEqual(len(packet["submission"]["paths"]), 13)
+        self.assertEqual(packet["submission"]["paths"][-1], "[1 more; read full record]")
+        self.assertIn(f"agent-room submission show {submission['id']}", packet["full_record_commands"])
+        self.assertLessEqual(len(dumps(packet).encode("utf-8")), MAX_REVIEW_PACKET_BYTES)
+
+    def test_review_queue_rejects_cross_task_submission_and_reused_id_with_new_submission(self):
+        first_task = self.task()
+        first_submission = self.submit(first_task)
+        other_task = self.task()
+        other_submission = self.submit(other_task)
+        with self.assertRaises(RoomError):
+            self.store.review_packet(first_task["id"], other_submission["id"])
+        with self.store.read() as db:
+            messages_before_refusal = db.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        with self.assertRaises(RoomError):
+            with self.store.tx() as db:
+                self.store.notify(db, "CLAUDE_01", "CODEX_EXPERT", "Review this", first_task["id"],
+                                  broadcast=False, review_submission=other_submission["id"])
+        with self.store.read() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM messages").fetchone()[0], messages_before_refusal)
+
+        second_task = self.task()
+        original = self.submit(second_task)
+        with self.store.tx() as db:
+            queued = self.store.queue(db, "CLAUDE_01", "CODEX_EXPERT", "Review revision", second_task["id"],
+                                      message_id="M-review-idempotency", review_submission=original["id"])
+        self.review(original, verdict="changes_requested", findings=[
+            {"summary": "Recheck after revision", "severity": "medium", "path": "work.py", "line": 1}])
+        revised = self.submit(second_task)
+        self.assertNotEqual(revised["id"], original["id"])
+        with self.assertRaises(RoomError):
+            with self.store.tx() as db:
+                self.store.queue(db, "CLAUDE_01", "CODEX_EXPERT", "Review revision", second_task["id"],
+                                 message_id=queued["id"], review_submission=revised["id"])
 
     def test_source_drift_after_approval_blocks_done_and_new_submission_recovers(self):
         task = self.task()

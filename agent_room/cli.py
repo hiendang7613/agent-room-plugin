@@ -88,9 +88,15 @@ def parser():
     for action in ("create", "update", "submit", "checkpoint"):
         sub = tasks.add_parser(action)
         sub.add_argument("--input", default="-", help="JSON object inline, a JSON file, or - for stdin")
+        if action == "create":
+            sub.add_argument("--claim", action="store_true",
+                             help="Create and claim your own scoped implementation task atomically")
         if action != "create":
             sub.add_argument("id")
             sub.add_argument("--expected-version", type=int, required=True)
+        if action in {"update", "submit"}:
+            sub.add_argument("--ack", metavar="MESSAGE_ID",
+                             help="Process a pending direct message for this task in the same transaction")
     listing = tasks.add_parser("list")
     listing.add_argument("--all", action="store_true")
     listing.add_argument("--owner", type=canonical_member, choices=MEMBERS)
@@ -112,6 +118,8 @@ def parser():
             record = operations.add_parser("record")
             record.add_argument("id", help="Submission ID to review")
             record.add_argument("--input", default="-")
+            record.add_argument("--ack", metavar="MESSAGE_ID",
+                                help="Process a pending direct message for this task in the same transaction")
     attempts = commands.add_parser("attempt", help="Native dispatch and output evidence, separate from task completion").add_subparsers(dest="action", required=True)
     attempts_list = attempts.add_parser("list")
     attempts_list.add_argument("--task")
@@ -173,7 +181,7 @@ def parser():
     inbox.add_argument("--after", type=int, default=0)
     inbox.add_argument("--limit", type=int, default=50)
     inbox.add_argument("--pending", action="store_true",
-                       help="Only messages without a processing ACK, including failed/unknown delivery; start each fresh sweep at --after 0")
+                       help="Actionable messages without a processing ACK; FYI copies stay in history, incomplete fan-outs appear in status")
     inbox.add_argument("--compact", action="store_true",
                        help="Preview body/detail with a full read command; process full content before ACK")
     inbox.add_argument("--wait", type=positive_timeout, metavar="SECONDS",
@@ -340,7 +348,7 @@ def run(args):
                                getattr(args, "id", None), getattr(args, "expected_version", None))
     actor = store.actor()
     if command == "review":
-        return store.record_review(actor, args.id, read_input(args.input, True))
+        return store.record_review(actor, args.id, read_input(args.input, True), ack_id=args.ack)
     if command == "stop":
         store.main_only(actor)
         request_stop(store)
@@ -362,13 +370,13 @@ def run(args):
         raise RoomError("Stop requested; process exit not yet confirmed", "pending")
     if command == "task":
         if args.action == "create":
-            return store.create_task(actor, read_input(args.input, True))
+            return store.create_task(actor, read_input(args.input, True), claim=args.claim)
         if args.action == "update":
-            return store.update_task(actor, args.id, args.expected_version, read_input(args.input, True))
+            return store.update_task(actor, args.id, args.expected_version, read_input(args.input, True), ack_id=args.ack)
         if args.action == "claim":
             return store.claim(actor, args.id, args.expected_version)
         if args.action == "submit":
-            return store.submit_task(actor, args.id, args.expected_version, read_input(args.input, True))
+            return store.submit_task(actor, args.id, args.expected_version, read_input(args.input, True), ack_id=args.ack)
         if args.action == "checkpoint":
             return store.checkpoint(actor, args.id, args.expected_version, read_input(args.input, True))
         return store.release(actor, args.id, args.token)
@@ -405,7 +413,8 @@ def run(args):
             if not body.strip() or not args.source_ref.strip():
                 raise RoomError("Recovery requires original human text and its source reference")
             receipt = store.intake(os.environ["AGENT_ROOM_SESSION_ID"], body, origin="manual_recovery:" + args.source_ref)
-            notification = store.broadcast_gateway_prompt(body, "recovery\0" + args.source_ref)
+            notification = store.broadcast_gateway_prompt(body, "recovery\0" + args.source_ref,
+                                                          receipt_id=receipt, provenance_state="manual_recovery")
             return {"receipt": receipt, "origin": "manual_recovery", "native_permission_approval_eligible": False,
                     "notify_all_queued": notification["members"], "room_status": notification["room_status"]}
         store.account(actor, args.id, args.disposition, args.refs)

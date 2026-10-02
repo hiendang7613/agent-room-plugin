@@ -26,6 +26,16 @@ def record(kind, data):
         stream.write(json.dumps({"kind": kind, "data": data, "member": os.environ.get("AGENT_ROOM_MEMBER")}) + "\n")
 
 
+def write_registry(path, data, replace=os.replace):
+    """Publish complete registry JSON so concurrent fake readers never parse a partial write."""
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(data), encoding="utf-8")
+        replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def commit_external_effect(effect_id):
     """Persist a fake downstream commit separately from the native event log."""
     with open(ROOT / "external_effects.jsonl", "a") as stream:
@@ -34,7 +44,27 @@ def commit_external_effect(effect_id):
                                  "outcome": "committed"}) + "\n")
 
 
-def daemon(session, project):
+def spawn_daemon(session, project, name, env=None, kind="background"):
+    child_env = env or {key: value for key, value in os.environ.items() if not key.startswith("AGENT_ROOM_")}
+    process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--daemon", session, project, name, kind],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               start_new_session=True, env=child_env)
+    registry = ROOT / (session + ".agent.json")
+    deadline = time.monotonic() + 4
+    while time.monotonic() < deadline and not registry.exists():
+        time.sleep(.02)
+    if not registry.exists():
+        process.terminate()
+        raise RuntimeError(f"fake daemon registry missing for {session}")
+    return process
+
+
+def hide_registry_name(name):
+    return bool(name and name.startswith("AGENT_ROOM_SMOKE_MAIN_")
+                and (ROOT / "hide_registry_name").exists())
+
+
+def daemon(session, project, name=None, kind="background", hide_pid=False, hide_name=False):
     sockets = ROOT / "sockets"
     sockets.mkdir(mode=0o700, exist_ok=True)
     path = sockets / f"{os.getpid()}.sock"
@@ -43,8 +73,15 @@ def daemon(session, project):
     server.bind(str(path))
     server.listen()
     server.settimeout(.2)
-    registry.write_text(json.dumps({"sessionId": session, "id": session[:8], "kind": "background",
-                                   "cwd": project, "pid": os.getpid(), "status": "done"}))
+    metadata = {"sessionId": session, "id": session[:8], "kind": kind,
+                "cwd": project, "status": "done"}
+    if name is not None and not hide_name:
+        metadata["name"] = name
+    if hide_pid:
+        (ROOT / (session + ".actual-pid")).write_text(str(os.getpid()), encoding="ascii")
+    else:
+        metadata["pid"] = os.getpid()
+    write_registry(registry, metadata)
     active = True
     def stop(_signum, _frame):
         nonlocal active
@@ -62,7 +99,9 @@ def daemon(session, project):
     finally:
         server.close()
         path.unlink(missing_ok=True)
-        registry.write_text(json.dumps({"sessionId": session, "cwd": project, "status": "stopped"}))
+        stopped = {**metadata, "status": "stopped"}
+        stopped.pop("pid", None)
+        write_registry(registry, stopped)
 
 
 def app_server():
@@ -142,7 +181,10 @@ def main():
     args = sys.argv[1:]
     name = Path(sys.argv[0]).name
     if args and args[0] == "--daemon":
-        daemon(args[1], args[2])
+        daemon(args[1], args[2], args[3] if len(args) > 3 else None,
+               args[4] if len(args) > 4 else "background",
+               hide_pid=(ROOT / "hide_registry_pid").exists(),
+               hide_name=hide_registry_name(args[3] if len(args) > 3 else None))
         return
     if "--version" in args:
         print("2.1.283 (Claude Code)" if name == "claude" else "codex-cli 0.157.1")
@@ -151,12 +193,27 @@ def main():
     elif name == "codex" and args[:1] == ["app-server"]:
         app_server()
     elif name == "claude" and args[:1] == ["agents"]:
+        before_agents = ROOT / "before_agents_sessions.json"
+        if before_agents.exists():
+            entries = json.loads(before_agents.read_text(encoding="utf-8"))
+            for item in entries:
+                item_name = os.environ.get("AGENT_ROOM_SMOKE_RUN_NAME", "") if item.get("name") == "$MAIN_NAME" else item.get("name", "")
+                spawn_daemon(item["sessionId"], item["cwd"], item_name,
+                             kind=item.get("kind", "background"))
+            before_agents.unlink()
         emit([json.loads(path.read_text()) for path in ROOT.glob("*.agent.json")])
     elif name == "claude" and args[:1] == ["stop"]:
         candidates = list(ROOT.glob(args[1] + "-*.agent.json"))
         if len(candidates) != 1:
             raise SystemExit("Native stop requires an unambiguous job ID, not session UUID")
         path = candidates[0]
+        record("claude_stop_attempt", args[1])
+        failed_stop = ROOT / ("fail_stop_" + args[1])
+        fail_next_stop = ROOT / "fail_next_stop"
+        if failed_stop.exists() or fail_next_stop.exists():
+            failed_stop.unlink(missing_ok=True)
+            fail_next_stop.unlink(missing_ok=True)
+            raise SystemExit("fixture stop failure")
         record("claude_stop", path.name.removesuffix(".agent.json"))
         if path.exists():
             pid = json.loads(path.read_text()).get("pid")
@@ -164,9 +221,16 @@ def main():
                 os.kill(pid, signal.SIGTERM)
     elif name == "claude" and "--bg" in args:
         flag = "--resume" if "--resume" in args else None
-        session = args[args.index(flag) + 1] if flag else str(uuid.uuid4())
+        configured_ids = ROOT / "launch_session_ids.json"
+        configured = json.loads(configured_ids.read_text(encoding="utf-8")) if configured_ids.exists() else []
+        session = args[args.index(flag) + 1] if flag else (configured[0] if configured else str(uuid.uuid4()))
+        agent_name = args[args.index("--name") + 1] if "--name" in args else None
         options_path = ROOT / (session + ".options.json")
         options = json.loads(options_path.read_text()) if flag and options_path.exists() else {}
+        if agent_name is not None:
+            options["name"] = agent_name
+        else:
+            agent_name = options.get("name")
         if "--settings" in args:
             options["settings"] = args[args.index("--settings") + 1]
         if flag == "--resume" and ((ROOT / "copy_claude").exists() or any(x in args for x in ("--settings", "--name", "--plugin-dir"))):
@@ -176,15 +240,21 @@ def main():
         child_env = {key: value for key, value in os.environ.items() if not key.startswith("AGENT_ROOM_")}
         if options.get("settings"):
             child_env.update(json.loads(Path(options["settings"]).read_text()).get("env", {}))
-        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--daemon", session, os.getcwd()],
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True, env=child_env)
+        spawn_daemon(session, os.getcwd(), agent_name or "", child_env)
+        injected = ROOT / "concurrent_sessions.json"
+        if injected.exists():
+            for item in json.loads(injected.read_text(encoding="utf-8")):
+                item_name = agent_name if item.get("name") == "$MAIN_NAME" else item.get("name", "")
+                spawn_daemon(item["sessionId"], item["cwd"], item_name, child_env,
+                             kind=item.get("kind", "background"))
         deadline = time.monotonic() + 4
         while time.monotonic() < deadline:
             path = ROOT / (session + ".agent.json")
             if path.exists() and json.loads(path.read_text()).get("pid"):
                 break
             time.sleep(.02)
+        if (ROOT / "fail_launch_after_daemon").exists():
+            raise SystemExit(23)  # Exercise a failed launcher after its detached worker has started.
         if (ROOT / "hold_claude_launch").exists():
             time.sleep(10)  # Simulate an interrupted launch after its background child exists.
         print("backgrounded · " + session[:8])

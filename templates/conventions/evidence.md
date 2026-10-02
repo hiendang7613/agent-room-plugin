@@ -16,6 +16,7 @@ Finish scoped work and checks, then:
 
 ```text
 agent-room task submit T-ID --expected-version N --input submission.json
+agent-room task submit T-ID --expected-version N --ack M-ID --input submission.json
 ```
 
 `submission.json`: `{"paths":["src/file.py","reviews/checks.md"],"summary":"What changed","evidence":["Exact check and result"]}`.
@@ -23,14 +24,23 @@ Use actual individual files; include deleted paths to record absence. At least o
 must exist. The store computes hashes; the author cannot supply or replace them. This freezes the
 declared review set, enters review and releases the author's writer claim. It does not prove that
 the set includes every relevant file. Main/reviewer must check scope completeness and acceptance.
+When this successful submission also processes a pending direct message for the same task, `--ack M-ID`
+records that processing in the same transaction and returns `processed_message`. On any failure, neither
+the submission nor the ACK commits.
 
 ## Assigned peer reviews
 
-Read `agent-room submission show S-ID`, current task context and listed source files.
-Run the authorized checks needed for acceptance. Record:
+Use the fresh review packet for the submission ID, exact digest, paths, acceptance and author-evidence previews.
+Previews are claims, not proof: inspect the actual listed files and run useful acceptance checks. Fetch full
+task/submission records when the packet is stale/truncated or a required path or acceptance is marked truncated.
+`submission.author_evidence_preview_truncated` marks shortened claim text; it does not alone require a full-record
+read. Evidence previews may be shorter than submitted claims; verify the work from source and checks.
+Only the assigned reviewer records a receipt. The reviewer is not the task owner and must not update or
+checkpoint the task. Record:
 
 ```text
 agent-room review record S-ID --input review.json
+agent-room review record S-ID --ack M-ID --input review.json
 ```
 
 `review.json`: `source_digest` (exact submitted digest), `verdict` (`approve`, `changes_requested`,
@@ -38,6 +48,9 @@ agent-room review record S-ID --input review.json
 (`high`, `medium`, `low`), optional submitted `path` and positive `line`.
 Approve only with no unresolved findings. Missing/changed source requires reconciliation and a new
 submission. Receipts are immutable; an identical retry returns the existing receipt.
+Use `--ack M-ID` only for a pending direct message linked to the reviewed task; the review receipt and
+processing ACK commit together. An FYI copy, another task's message or an already processed message is
+rejected. The response's `processed_message` names the ACK; it is not part of the immutable review receipt.
 
 For corrections, follow previous_submission and review_receipts from `submission show` to read earlier
 findings. The author moves the task back to ready, claims its scope, fixes and submits again.

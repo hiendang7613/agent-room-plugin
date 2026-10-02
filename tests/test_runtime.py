@@ -2,12 +2,16 @@ import json
 import hashlib
 import os
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+import runpy
 import signal
 import subprocess
 import sys
 import tempfile
+from threading import Event
 import time
 import unittest
+from unittest.mock import patch
 import uuid
 import zipfile
 
@@ -23,6 +27,79 @@ from receipts import human_receipt
 FIXTURE = Path(__file__).parent / "fake_native.py"
 CLI = PLUGIN_ROOT / "bin/agent-room"
 EFFECT_AUDIT = PLUGIN_ROOT / "labs/benchmark_v2/g1_receipt_audit/effect_audit.py"
+
+
+def terminate_process_group(process, grace=3):
+    """Stop a smoke runner and same-group descendants that may keep its output pipes open."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        return process.communicate(timeout=grace)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        return process.communicate(timeout=grace)
+
+
+class SmokeProcessGroupTests(unittest.TestCase):
+    def test_cleanup_kills_same_group_child_holding_runner_output_pipes(self):
+        with tempfile.TemporaryDirectory(prefix="smoke group ") as directory:
+            marker = Path(directory) / "child.pid"
+            child = "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(str(__import__('os').getpid())); time.sleep(60)"
+            runner = "import subprocess,sys; subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]])"
+            process = subprocess.Popen([sys.executable, "-c", runner, child, str(marker)],
+                                       start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            deadline = time.monotonic() + 5
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertTrue(marker.exists(), "fixture child did not start")
+            child_pid = int(marker.read_text())
+            child_stamp = process_stamp(child_pid)
+            self.assertTrue(child_stamp)
+            process.wait(timeout=5)
+            with self.assertRaises(subprocess.TimeoutExpired,
+                                   msg="the child should reproduce the inherited-pipe hang"):
+                process.communicate(timeout=.05)
+
+            terminate_process_group(process)
+            self.assertFalse(process_alive(child_pid, child_stamp))
+            stdout, stderr = process.communicate(timeout=1)
+            self.assertEqual((stdout, stderr), (b"", b""))
+
+
+class FakeRegistryPublicationTests(unittest.TestCase):
+    def test_concurrent_reader_sees_old_or_complete_new_registry(self):
+        with tempfile.TemporaryDirectory(prefix="fake registry ") as directory:
+            root = Path(directory)
+            with patch.dict(os.environ, {"FAKE_NATIVE_ROOT": str(root / "native")}):
+                write_registry = runpy.run_path(str(FIXTURE), run_name="fake_native_test")["write_registry"]
+
+            registry = root / "session.agent.json"
+            original = {"sessionId": "old-session", "pid": 101}
+            updated = {"sessionId": "new-session", "pid": 202, "detail": "complete registry payload"}
+            registry.write_text(json.dumps(original), encoding="utf-8")
+            replacement_entered, allow_publish = Event(), Event()
+
+            def pause_before_publish(source, destination):
+                replacement_entered.set()
+                if not allow_publish.wait(3):
+                    raise TimeoutError("test did not release the atomic registry replacement")
+                os.replace(source, destination)
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                write = pool.submit(write_registry, registry, updated, pause_before_publish)
+                self.assertTrue(replacement_entered.wait(3), "registry writer did not reach atomic publication")
+                try:
+                    self.assertEqual(json.loads(registry.read_text(encoding="utf-8")), original)
+                finally:
+                    allow_publish.set()
+                write.result(timeout=5)
+
+            self.assertEqual(json.loads(registry.read_text(encoding="utf-8")), updated)
 
 
 class RuntimeTests(unittest.TestCase):
@@ -84,6 +161,24 @@ class RuntimeTests(unittest.TestCase):
         if not path.exists():
             return []
         return [item for line in path.read_text().splitlines() if (item := json.loads(line))["kind"] == kind]
+
+    def cleanup_fake_registry_sessions(self, sessions):
+        for session in sessions:
+            registry = self.root / "native" / (session + ".agent.json")
+            pid_file = self.root / "native" / (session + ".actual-pid")
+            try:
+                pid = json.loads(registry.read_text()).get("pid") if registry.exists() else None
+            except (OSError, json.JSONDecodeError):
+                pid = None
+            if not pid and pid_file.exists():
+                pid = int(pid_file.read_text(encoding="ascii"))
+            stamp = process_stamp(pid)
+            if stamp:
+                os.kill(pid, signal.SIGTERM)
+                deadline = time.monotonic() + 3
+                while process_alive(pid, stamp) and time.monotonic() < deadline:
+                    time.sleep(.02)
+                self.assertFalse(process_alive(pid, stamp), f"test-owned fake daemon {session} leaked")
 
     def external_effects(self):
         path = self.root / "native/external_effects.jsonl"
@@ -174,20 +269,25 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(attempt["knowledge_reference"]["current_version"], 2)
             self.assertIsNone(attempt["processed"])
 
-    def review_smoke_fixture(self, acknowledge, source_path=None, extra_peer_handoff=False):
+    def review_smoke_fixture(self, acknowledge, source_path=None, extra_peer_handoff=False,
+                             hide_registry_name=False):
         """Run the real smoke entrypoint; the test peers supply deterministic receipts."""
         project = self.root / ("smoke-with-ack" if acknowledge else "smoke-without-ack")
         project.mkdir()
+        if hide_registry_name:
+            (self.root / "native/hide_registry_name").touch()
         script = PLUGIN_ROOT / "scripts/native_smoke.py"
         code = "import sys; p=sys.argv.pop(1); f=sys.argv.pop(1); exec(compile(open(p).read(), f, 'exec'), {'__name__':'__main__','__file__':f})"
         process = subprocess.Popen([sys.executable, "-c", code, str(source_path or script), str(script),
-            "--scenario", "review", "--execute", "--timeout", "2", "--project", str(project)],
-            env=self.env, cwd=PLUGIN_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            "--scenario", "review", "--execute", "--timeout", "8", "--project", str(project)],
+            env=self.env, cwd=PLUGIN_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True)
         store = Store(project)
         reviewed = set()
         deadline = time.monotonic() + 25
         try:
             while process.poll() is None and time.monotonic() < deadline:
+                messages = []
                 if store.exists():
                     with store.read() as db:
                         submissions = [json.loads(row[0]) for row in db.execute("SELECT data FROM submissions")]
@@ -201,22 +301,24 @@ class RuntimeTests(unittest.TestCase):
                             if extra_peer_handoff and len(reviewed) == 2:
                                 store.send("CODEX_EXPERT", "CLAUDE_01", "Fixture substantive handoff after review",
                                            submission["task"])
-                    if acknowledge:
-                        for message in messages:
-                            if message["status"] in {"accepted", "submitted"}:
+                if acknowledge:
+                    for message in messages:
+                        if message["status"] in {"accepted", "submitted"}:
+                            context = json.loads(message["context"])
+                            if not (context.get("broadcast") or context.get("admin_relay")):
                                 store.acknowledge(message["recipient"], message["id"], "Fixture recipient processed the message")
                 time.sleep(.025)
             self.assertIsNotNone(process.poll(), "Smoke fixture did not finish")
             stdout, stderr = process.communicate(timeout=5)
             report = json.loads((project / "native-smoke-report.json").read_text())
+            if report.get("status") == "failed":
+                log_path = report.get("error_details", {}).get("log_path")
+                log = Path(log_path) if log_path else None
+                report["launch_log_tail"] = log.read_text(encoding="utf-8", errors="replace")[-4000:] if log and log.is_file() else "launch log missing"
             self.assertEqual(len(reviewed), 2, (stdout, stderr, report))
             return process.returncode, report
         finally:
-            if process.poll() is None:
-                process.terminate()
-                process.wait(timeout=5)
-            process.stdout.close()
-            process.stderr.close()
+            terminate_process_group(process)
             if store.exists():
                 session = (store.room().get("owner") or {}).get("session")
                 if session:
@@ -230,17 +332,29 @@ class RuntimeTests(unittest.TestCase):
         exit_code, report = self.review_smoke_fixture(acknowledge=False)
         self.assertEqual(exit_code, 1, report)
         self.assertEqual(report["status"], "failed")
-        self.assertIn("both review requests and peer notifications processed", report["error"])
+        self.assertIn("review work processed and FYI deliveries sent", report["error"])
         self.assertEqual(report["final_status"]["tasks"][0]["state"], "review")
         self.assertFalse(report["final_status"]["supervisor_alive"])
 
-    def test_review_smoke_waits_for_all_messages_and_native_completion(self):
+    def test_review_smoke_waits_for_actionable_work_and_native_completion(self):
         exit_code, report = self.review_smoke_fixture(acknowledge=True)
         self.assertEqual((exit_code, report["status"]), (0, "passed"), report)
-        self.assertEqual(report["final_status"]["message_counts"], {"processed": 12})
+        actionable = [message for message in report["messages"] if message["delivery_kind"] == "actionable"]
+        fyi = [message for message in report["messages"] if message["delivery_kind"] == "fyi"]
+        self.assertTrue(actionable)
+        self.assertTrue(all(message["status"] == "processed" for message in actionable))
+        self.assertTrue(fyi)
+        self.assertTrue(all(message["status"] in {"accepted", "submitted", "processed"} for message in fyi))
+        self.assertTrue(any(message["status"] != "processed" for message in fyi),
+                        "The fixture must prove a review FYI can remain unacknowledged")
         attempts = report["attempts_before_restart"]
-        self.assertEqual([a["state"] for a in attempts if a["member"] == "CODEX_EXPERT"], ["completed", "completed"])
-        self.assertTrue(all(a["processed"] for a in attempts))
+        message_kinds = {message["id"]: message["delivery_kind"] for message in report["messages"]}
+        direct_codex = [a for a in attempts if a["member"] == "CODEX_EXPERT"
+                        and message_kinds[a["message"]] == "actionable"]
+        self.assertEqual([a["state"] for a in direct_codex], ["completed", "completed"])
+        self.assertTrue(all(a.get("processed") for a in direct_codex))
+        self.assertTrue(any(not a.get("processed") for a in attempts
+                            if message_kinds[a["message"]] == "fyi"))
         self.assertEqual(report["final_status"]["tasks"][0]["state"], "done")
         self.assertFalse(report["final_status"]["supervisor_alive"])
         self.assertIn({"check": "owned native process exit confirmed", "passed": True}, report["checks"])
@@ -248,10 +362,244 @@ class RuntimeTests(unittest.TestCase):
     def test_review_smoke_allows_processed_substantive_peer_handoff(self):
         exit_code, report = self.review_smoke_fixture(acknowledge=True, extra_peer_handoff=True)
         self.assertEqual((exit_code, report["status"]), (0, "passed"), report)
-        self.assertEqual(report["final_status"]["message_counts"], {"processed": 15})
         self.assertEqual(len(report["submissions"]), 2)
-        self.assertTrue(all(a["processed"] for a in report["attempts_before_restart"]))
+        message_kinds = {message["id"]: message["delivery_kind"] for message in report["messages"]}
+        self.assertTrue(all(a.get("processed") for a in report["attempts_before_restart"]
+                            if message_kinds[a["message"]] == "actionable"))
+        self.assertTrue(any(not a.get("processed") for a in report["attempts_before_restart"]
+                            if message_kinds[a["message"]] == "fyi"))
         self.assertFalse(report["final_status"]["supervisor_alive"])
+
+    def test_review_smoke_confirms_cleanup_by_exact_session_id_without_registry_name(self):
+        exit_code, report = self.review_smoke_fixture(acknowledge=True, hide_registry_name=True)
+        self.assertEqual((exit_code, report["status"]), (0, "passed"), report)
+        self.assertTrue(report["cleanup"]["confirmed"], report)
+        self.assertEqual(report["cleanup"]["remaining_claude_sessions"], [], report)
+        self.assertEqual(report["cleanup"]["unverified_claude_sessions"], [], report)
+        self.assertTrue(report["main_session"])
+        registry = self.root / "native" / (report["main_session"] + ".agent.json")
+        self.assertTrue(registry.exists())
+        self.assertNotIn("name", json.loads(registry.read_text(encoding="utf-8")))
+
+    def test_review_smoke_cleans_detached_main_after_launcher_fails(self):
+        project = self.root / "review partial launch"
+        project.mkdir()
+        foreign = self.root / "foreign project"
+        foreign.mkdir()
+        preexisting_same_id, preexisting_foreign_id = str(uuid.uuid4()), str(uuid.uuid4())
+        concurrent_same_id, concurrent_foreign_id = str(uuid.uuid4()), str(uuid.uuid4())
+        main_name_placeholder = "$MAIN_NAME"
+        preexisting = [{"sessionId": preexisting_same_id, "cwd": str(project), "name": main_name_placeholder},
+                       {"sessionId": preexisting_foreign_id, "cwd": str(foreign), "name": main_name_placeholder}]
+        (self.root / "native/before_agents_sessions.json").write_text(json.dumps(preexisting), encoding="utf-8")
+        concurrent = [{"sessionId": concurrent_same_id, "cwd": str(project), "name": "Concurrent user session"},
+                      {"sessionId": concurrent_foreign_id, "cwd": str(foreign), "name": main_name_placeholder}]
+        (self.root / "native/concurrent_sessions.json").write_text(json.dumps(concurrent), encoding="utf-8")
+        self.addCleanup(self.cleanup_fake_registry_sessions,
+                        [preexisting_same_id, preexisting_foreign_id, concurrent_same_id, concurrent_foreign_id])
+        (self.root / "native/fail_launch_after_daemon").touch()
+        process = subprocess.run([sys.executable, str(PLUGIN_ROOT / "scripts/native_smoke.py"),
+            "--scenario", "review", "--execute", "--timeout", "5", "--project", str(project)],
+            env=self.env, cwd=PLUGIN_ROOT, text=True, capture_output=True, timeout=20)
+        report = json.loads((project / "native-smoke-report.json").read_text())
+        self.assertEqual(process.returncode, 1, (process.stdout, process.stderr, report))
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("cleanup", report, report)
+        self.assertTrue(report["cleanup"]["confirmed"], report)
+        self.assertEqual(report["cleanup"]["remaining_claude_sessions"], [], report)
+        main_name = report["main_name"]
+        self.assertTrue(main_name.startswith("AGENT_ROOM_SMOKE_MAIN_"))
+        started = [item["data"]["id"] for item in self.effects("claude_start")]
+        stopped = [item["data"] for item in self.effects("claude_stop")]
+        self.assertTrue(started)
+        self.assertTrue(all(session_id in stopped for session_id in started), (started, stopped))
+        stopped_names = {session for session in stopped}
+        self.assertNotIn(preexisting_same_id, stopped_names)
+        self.assertNotIn(preexisting_foreign_id, stopped_names)
+        self.assertNotIn(concurrent_same_id, stopped_names)
+        self.assertNotIn(concurrent_foreign_id, stopped_names)
+        for session_id, label in ((preexisting_same_id, "pre-existing same-project"),
+                                  (preexisting_foreign_id, "pre-existing foreign")):
+            registry = self.root / "native" / (session_id + ".agent.json")
+            self.assertTrue(registry.exists(), f"{label} registry missing: {session_id}; present={[p.name for p in (self.root / 'native').glob('*.agent.json')]}; effects={self.effects('claude_stop_attempt')}")
+            entry = json.loads(registry.read_text())
+            self.assertTrue(process_stamp(entry.get("pid")), f"{label} session was stopped")
+        self.assertTrue(process_stamp(int(json.loads((self.root / "native" / (concurrent_same_id + ".agent.json")).read_text())["pid"])),
+                        "concurrent same-project session with another name was stopped")
+        self.assertTrue(process_stamp(int(json.loads((self.root / "native" / (concurrent_foreign_id + ".agent.json")).read_text())["pid"])),
+                        "concurrent foreign session was stopped")
+
+    def test_review_smoke_partial_launch_times_out_and_cleans_exact_named_session(self):
+        project = self.root / "review launch timeout"
+        project.mkdir()
+        (self.root / "native/hold_claude_launch").touch()
+        process = subprocess.run([sys.executable, str(PLUGIN_ROOT / "scripts/native_smoke.py"),
+            "--scenario", "review", "--execute", "--timeout", "0.2", "--project", str(project)],
+            env=self.env, cwd=PLUGIN_ROOT, text=True, capture_output=True, timeout=15)
+        report = json.loads((project / "native-smoke-report.json").read_text())
+        self.assertEqual(process.returncode, 1, (process.stdout, process.stderr, report))
+        self.assertIn("background launch timed out", report["error"])
+        self.assertTrue(report["cleanup"]["confirmed"], report)
+        started = [item["data"]["id"] for item in self.effects("claude_start")]
+        stopped = [item["data"] for item in self.effects("claude_stop")]
+        self.assertTrue(started)
+        self.assertEqual(stopped, started)
+
+    def test_review_smoke_does_not_confirm_partial_session_without_pid(self):
+        project = self.root / "review missing pid"
+        project.mkdir()
+        (self.root / "native/hide_registry_pid").touch()
+        process = subprocess.run([sys.executable, str(PLUGIN_ROOT / "scripts/native_smoke.py"),
+            "--scenario", "review", "--execute", "--timeout", "5", "--project", str(project)],
+            env=self.env, cwd=PLUGIN_ROOT, text=True, capture_output=True, timeout=20)
+        report = json.loads((project / "native-smoke-report.json").read_text())
+        session = self.effects("claude_start")[0]["data"]["id"]
+        self.addCleanup(self.cleanup_fake_registry_sessions, [session])
+        pid = int((self.root / "native" / (session + ".actual-pid")).read_text(encoding="ascii"))
+        self.assertEqual(process.returncode, 1, (process.stdout, process.stderr, report))
+        self.assertFalse(report["cleanup"]["confirmed"], report)
+        self.assertIn(session, report["partial_launch_unverified_sessions"], report)
+        self.assertIn(session, report["cleanup"]["remaining_claude_sessions"])
+        self.assertIn(session, report["cleanup"]["unverified_claude_sessions"])
+        self.assertTrue(process_stamp(pid), "fixture daemon must still exist to prove it was not falsely called cleaned")
+
+    def test_partial_launch_stops_own_descendants_before_registry_scan(self):
+        project = self.root / "review launch descendant"
+        project.mkdir()
+        bootstrap = self.root / "run partial launch fixture.py"
+        child_file = self.root / "launch child.json"
+        events_file = self.root / "cleanup events.jsonl"
+        bootstrap.write_text("""
+import asyncio
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+from scripts import native_smoke as smoke
+from agent_room.common import process_alive, process_stamp
+
+child_processes = []
+
+def record(event, **data):
+    with open(os.environ["SMOKE_EVENTS_FILE"], "a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"event": event, **data}) + "\\n")
+
+async def fail_after_spawning_owned_child(*args, **kwargs):
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+    child_processes.append(child)
+    stamp = None
+    deadline = __import__("time").monotonic() + 3
+    while not stamp and __import__("time").monotonic() < deadline:
+        stamp = process_stamp(child.pid)
+        if not stamp:
+            __import__("time").sleep(.01)
+    Path(os.environ["SMOKE_CHILD_FILE"]).write_text(
+        json.dumps({"pid": child.pid, "stamp": stamp}), encoding="utf-8")
+    raise smoke.RoomError("fixture launcher failed after spawning a child", "native")
+
+original_stop = smoke.stop_descendants
+original_scan = smoke._smoke_session_sets
+
+async def record_stop(owned):
+    record("stop_descendants", pids=sorted(owned))
+    await original_stop(owned)
+
+def record_scan(*args, **kwargs):
+    record("registry_scan")
+    return original_scan(*args, **kwargs)
+
+smoke.start_claude = fail_after_spawning_owned_child
+smoke.stop_descendants = record_stop
+smoke._smoke_session_sets = record_scan
+sys.argv = ["native_smoke.py", "--execute", "--scenario", "review", "--timeout", "1",
+            "--project", os.environ["SMOKE_PROJECT"]]
+exit_code = smoke.main()
+child = child_processes[0]
+try:
+    child.wait(timeout=.5)
+except subprocess.TimeoutExpired:
+    pass
+Path(os.environ["SMOKE_CHILD_FILE"]).write_text(json.dumps({
+    "pid": child.pid, "stamp": process_stamp(child.pid),
+    "alive_after_cleanup": process_alive(child.pid, process_stamp(child.pid))}), encoding="utf-8")
+raise SystemExit(exit_code)
+""", encoding="utf-8")
+        env = dict(self.env, SMOKE_PROJECT=str(project), SMOKE_CHILD_FILE=str(child_file),
+                   SMOKE_EVENTS_FILE=str(events_file),
+                   PYTHONPATH=os.environ.get("SMOKE_TEST_PYTHONPATH", str(PLUGIN_ROOT)))
+        child = None
+        try:
+            process = subprocess.run([sys.executable, str(bootstrap)], env=env, cwd=PLUGIN_ROOT,
+                                     text=True, capture_output=True, timeout=15)
+            self.assertEqual(process.returncode, 1, (process.stdout, process.stderr))
+            self.assertTrue(child_file.exists(), (process.stdout, process.stderr))
+            child = json.loads(child_file.read_text(encoding="utf-8"))
+            events = [json.loads(line) for line in events_file.read_text(encoding="utf-8").splitlines()]
+            stop_indices = [i for i, event in enumerate(events) if event["event"] == "stop_descendants"]
+            scan_indices = [i for i, event in enumerate(events) if event["event"] == "registry_scan"]
+            self.assertTrue(stop_indices, f"owned descendants were not stopped: {events}")
+            self.assertTrue(scan_indices, f"partial-launch registry was not inspected: {events}")
+            stop_index, scan_index = stop_indices[0], scan_indices[0]
+            self.assertLess(stop_index, scan_index, events)
+            self.assertIn(child["pid"], events[stop_index]["pids"], events)
+            self.assertFalse(child["alive_after_cleanup"], child)
+            report = json.loads((project / "native-smoke-report.json").read_text(encoding="utf-8"))
+            self.assertTrue(report["cleanup"]["confirmed"], report)
+        finally:
+            if child_file.exists():
+                child = json.loads(child_file.read_text(encoding="utf-8"))
+                if process_alive(child["pid"], child.get("stamp")):
+                    os.kill(child["pid"], signal.SIGTERM)
+
+    def test_review_smoke_attempts_each_partial_session_after_stop_failure(self):
+        project = self.root / "review stop failure"
+        project.mkdir()
+        main_id = "00000001-0000-4000-8000-000000000001"
+        sibling_id = "00000002-0000-4000-8000-000000000002"
+        (self.root / "native/launch_session_ids.json").write_text(json.dumps([main_id]), encoding="utf-8")
+        (self.root / "native/concurrent_sessions.json").write_text(json.dumps([
+            {"sessionId": sibling_id, "cwd": str(project), "name": "$MAIN_NAME"}]), encoding="utf-8")
+        (self.root / "native/fail_stop_00000001").touch()
+        (self.root / "native/fail_launch_after_daemon").touch()
+        self.addCleanup(self.cleanup_fake_registry_sessions, [main_id, sibling_id])
+        process = subprocess.run([sys.executable, str(PLUGIN_ROOT / "scripts/native_smoke.py"),
+            "--scenario", "review", "--execute", "--timeout", "5", "--project", str(project)],
+            env=self.env, cwd=PLUGIN_ROOT, text=True, capture_output=True, timeout=20)
+        report = json.loads((project / "native-smoke-report.json").read_text())
+        attempts = [item["data"] for item in self.effects("claude_stop_attempt")]
+        stops = [item["data"] for item in self.effects("claude_stop")]
+        self.assertEqual(process.returncode, 1, (process.stdout, process.stderr, report))
+        self.assertEqual(attempts, [main_id[:8], sibling_id[:8]])
+        self.assertEqual(stops, [sibling_id])
+        self.assertEqual(len(report["partial_launch_cleanup_errors"]), 1, report)
+        self.assertEqual(report["partial_launch_cleanup_errors"][0]["session"], main_id)
+        self.assertFalse(report["cleanup"]["confirmed"], report)
+        self.assertIn(main_id, report["cleanup"]["remaining_claude_sessions"])
+
+    def test_review_smoke_does_not_stop_matching_name_with_wrong_session_kind(self):
+        project = self.root / "review wrong kind"
+        project.mkdir()
+        unrelated_id = str(uuid.uuid4())
+        (self.root / "native/concurrent_sessions.json").write_text(json.dumps([
+            {"sessionId": unrelated_id, "cwd": str(project), "name": "$MAIN_NAME", "kind": "foreground"}]),
+            encoding="utf-8")
+        (self.root / "native/fail_launch_after_daemon").touch()
+        self.addCleanup(self.cleanup_fake_registry_sessions, [unrelated_id])
+        process = subprocess.run([sys.executable, str(PLUGIN_ROOT / "scripts/native_smoke.py"),
+            "--scenario", "review", "--execute", "--timeout", "5", "--project", str(project)],
+            env=self.env, cwd=PLUGIN_ROOT, text=True, capture_output=True, timeout=15)
+        report = json.loads((project / "native-smoke-report.json").read_text())
+        attempted = [item["data"] for item in self.effects("claude_stop_attempt")]
+        self.assertEqual(process.returncode, 1, (process.stdout, process.stderr, report))
+        self.assertNotIn(unrelated_id[:8], attempted)
+        self.assertIn("partial_launch_unverified_sessions", report, report)
+        self.assertIn(unrelated_id, report["partial_launch_unverified_sessions"])
+        self.assertIn(unrelated_id, report["cleanup"]["remaining_claude_sessions"])
+        self.assertFalse(report["cleanup"]["confirmed"], report)
 
     def learning_smoke_fixture(self, outcome="correct"):
         """Actual runner and native transport fixture, with independent fixed peer answers."""
@@ -259,13 +607,14 @@ class RuntimeTests(unittest.TestCase):
         project.mkdir()
         if outcome == "partial_launch":
             (self.root / "native/hold_claude_launch").touch()
-        budget = "1.2" if outcome == "partial_launch" else "4" if outcome == "timeout" else "30"
+        budget = "1.2" if outcome == "partial_launch" else "4" if outcome == "timeout" else "90"
         process = subprocess.Popen([sys.executable, str(PLUGIN_ROOT / "scripts/native_smoke.py"),
             "--scenario", "learning", "--execute", "--timeout", "15", "--max-seconds", budget,
             "--project", str(project)], env=self.env, cwd=PLUGIN_ROOT, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         store = Store(project)
         answered = set()
+        unexpected_sent = False
         lesson = None
         interrupted = False
         deadline = time.monotonic() + 40
@@ -304,8 +653,15 @@ class RuntimeTests(unittest.TestCase):
                                     value["delay_seconds"] = reply["retry_after"]
                             store.send("CODEX_EXPERT", "CLAUDE_01", PREFIX + json.dumps(value))
                             answered.add(message["id"])
+                            if outcome == "extra_message" and not unexpected_sent:
+                                store.send("CODEX_EXPERT", "CLAUDE_01",
+                                           "Unexpected extra fixture message outside the 18-delivery plan")
+                                unexpected_sent = True
                         if outcome not in {"timeout", "interrupt"} and message["status"] in {"accepted", "submitted"}:
-                            store.acknowledge(message["recipient"], message["id"], "Offline fixture processed the case")
+                            context = json.loads(message["context"])
+                            is_fyi = bool(context.get("broadcast") or context.get("admin_relay"))
+                            if not is_fyi:
+                                store.acknowledge(message["recipient"], message["id"], "Offline fixture processed the case")
                 time.sleep(.025)
             self.assertIsNotNone(process.poll(), "Learning smoke fixture did not finish")
             stdout, stderr = process.communicate(timeout=5)
@@ -315,11 +671,13 @@ class RuntimeTests(unittest.TestCase):
             self.assertIsNone(self.main_process.poll(), "Unrelated fixture main was stopped")
             return process.returncode, report
         finally:
-            if process.poll() is None:
-                process.terminate()
-                process.wait(timeout=15)
-            process.stdout.close()
-            process.stderr.close()
+            terminate_process_group(process, grace=5)
+            if store.exists():
+                session = (store.room().get("owner") or {}).get("session")
+                if session:
+                    cleanup_env = dict(self.env, AGENT_ROOM_SESSION_ID=session)
+                    subprocess.run([sys.executable, str(CLI), "--project", str(project), "stop"],
+                                   cwd=PLUGIN_ROOT, env=cleanup_env, capture_output=True, timeout=15)
             for path in (self.root / "native").glob("*.agent.json"):
                 agent = json.loads(path.read_text())
                 if agent.get("cwd") == str(project) and agent.get("id"):
@@ -334,7 +692,17 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual([p["knowledge"]["version"] for p in phases], [1, 1, 2])
         self.assertEqual(phases[1]["result"]["delay_seconds"], 1.75)
         self.assertEqual(phases[2]["result"]["delay_seconds"], 2)
-        self.assertEqual(report["final_status"]["message_counts"], {"processed": 18})
+        self.assertEqual(report["final_status"]["message_counts"], {
+            "accepted": 6, "processed": 6, "submitted": 6})
+        actionable = [message for message in report["learning"]["messages"]
+                      if message["delivery_kind"] == "actionable"]
+        fyi = [message for message in report["learning"]["messages"] if message["delivery_kind"] == "fyi"]
+        self.assertEqual(len(actionable), 6)
+        self.assertTrue(all(message["status"] == "processed" for message in actionable))
+        self.assertEqual(len(fyi), 12)
+        self.assertTrue(all(message["status"] in {"accepted", "submitted", "processed"} for message in fyi))
+        self.assertTrue(any(message["status"] != "processed" for message in fyi),
+                        "The fixture must prove an FYI can remain unacknowledged")
         self.assertTrue(report["cleanup"]["confirmed"])
         self.assertEqual(len(report["retained_learning_state"]["revisions"]), 2)
         self.assertIn("resources/collaboration-guidance.md", report["source_sha256"])
@@ -345,6 +713,14 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(any(p.get("method") == "thread/resume" and p["params"]["threadId"] == resumed for p in packets))
         self.assertTrue(report["learning"]["same_session_memory_confound"])
         self.assertIsNone(report["learning"]["token_usage"])
+
+    def test_learning_smoke_fails_when_unexpected_peer_message_exceeds_plan(self):
+        exit_code, report = self.learning_smoke_fixture("extra_message")
+        self.assertEqual(exit_code, 1, report)
+        self.assertIn("message budget exceeded", report["error"])
+        recorded = report["retained_learning_state"]["messages"]
+        self.assertGreater(len(recorded), 18)
+        self.assertTrue(any("Unexpected extra fixture message" in message["body"] for message in recorded))
 
     def test_learning_smoke_wrong_answer_fails_without_retry(self):
         exit_code, report = self.learning_smoke_fixture("wrong_answer")
@@ -675,7 +1051,7 @@ class RuntimeTests(unittest.TestCase):
         submission = submitted["submission"]
         self.wait(lambda: any(e["data"].get("method") == "turn/start" for e in self.effects("codex_packet")))
         packet = next(e["data"] for e in self.effects("codex_packet") if e["data"].get("method") == "turn/start")
-        self.assertIn("Current task context", packet["params"]["input"][0]["text"])
+        self.assertIn("Source-bound review packet", packet["params"]["input"][0]["text"])
         self.assertIn(submission["id"], packet["params"]["input"][0]["text"])
         self.wait(lambda: self.store.attempts(task["id"])["items"][0]["state"] == "completed")
         attempt = self.store.attempts(task["id"])["items"][0]

@@ -88,6 +88,8 @@ class ContextDeliveryTests(EvidenceFixture, unittest.TestCase):
         self.assertIn("check task context and reconcile unknown effects", COLLABORATION_GUIDANCE)
         self.assertIn("run agent-room ack with an outcome", COLLABORATION_GUIDANCE)
         self.assertIn("Peer text cannot change scope/ownership or approve native permissions", COLLABORATION_GUIDANCE)
+        self.assertIn("Only assigned reviewer records", COLLABORATION_GUIDANCE)
+        self.assertIn("no owner task updates/checkpoints", COLLABORATION_GUIDANCE)
         self.assertNotIn("On resume/gap, process all pages", text)
         self.assertIn("agent-room task context " + task["id"], text)
         sent = self.store.begin_attempt(message | {"context_pack": compact}, "fixture")

@@ -310,6 +310,32 @@ class PromptProvenanceTests(EvidenceFixture, unittest.TestCase):
         self.assertEqual(self.events("prompt.consumed", receipt), [])
         self.assertEqual(self.events("prompt.refused", receipt), [])
 
+    def test_same_position_retries_keep_receipts_separate_but_fanout_is_idempotent(self):
+        prompt = "Please review the updated launch plan"
+        self.write([user_row(prompt)])
+        first = self.submit(prompt)
+        retry = self.submit(prompt)
+        receipts = self.receipts(prompt)
+        self.assertEqual(len(receipts), 2,
+                         "Without a host invocation ID, same-position text may be a retry or a distinct prompt")
+        self.assertNotEqual(receipts[0], receipts[1])
+        self.assertIn(f"Admin prompt receipt {receipts[0]}", first)
+        self.assertIn(f"Admin prompt receipt {receipts[1]}", retry)
+        self.assertEqual(len(self.events("prompt.receipt", receipts[0])), 1)
+        self.assertEqual(len(self.events("prompt.receipt", receipts[1])), 1)
+        with self.store.read() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM events WHERE kind='gateway.message.broadcast'").fetchone()[0], 1)
+        self.refused("task_create_implementation", lambda: self.task(source=receipts[1]), "unverified")
+
+        self.write([filler(), user_row(prompt)], "a")
+        self.submit(prompt)
+        distinct_receipts = self.receipts(prompt)
+        self.assertEqual(len(distinct_receipts), 3,
+                         "The same wording at a new transcript position is a distinct prompt event")
+        self.assertEqual(len(set(distinct_receipts)), 3)
+        with self.store.read() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM events WHERE kind='gateway.message.broadcast'").fetchone()[0], 2)
+
     def test_missing_and_unknown_transcript_origins_are_unverified(self):
         for label, origin in (("missing", None), ("future", {"kind": "future-human-label"})):
             with self.subTest(origin=label):

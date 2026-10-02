@@ -17,7 +17,7 @@ from agent_room.common import (GATEWAY, MEMBERS, MODES, acting_member, PLUGIN_RO
 from agent_room.native import (CodexClient, claude_agents, doctor, exact_claude,
                                owned_descendants, send_claude, start_claude, stop_claude_worker,
                                stop_descendants, wait_for_exit)
-from agent_room.store import Store
+from agent_room.store import FYI_CONTEXT_SQL, Store
 
 
 def bind_main(store, session, permission_mode="default"):
@@ -341,13 +341,20 @@ class Supervisor:
             member = self.store.member(target)
             if member["status"] in paused:
                 continue
-            # Refresh per delivery: an earlier message in this same batch may have failed.
-            with self.store.read() as db:
-                message["pending_recovery"] = bool(db.execute(
-                    "SELECT 1 FROM messages WHERE recipient=? AND status IN ('failed','unknown') LIMIT 1",
-                    (target,)).fetchone())
-            if message["task"]:
-                message["context_pack"] = self.store.task_context(message["task"], compact=True)
+            context = json.loads(message["context"])
+            fyi = bool(context.get("broadcast") or context.get("admin_relay"))
+            # Refresh per actionable delivery: an earlier failed FYI is not an unknown side effect.
+            message["pending_recovery"] = False
+            if not fyi:
+                with self.store.read() as db:
+                    message["pending_recovery"] = bool(db.execute(
+                        f"SELECT 1 FROM messages WHERE recipient=? AND status IN ('failed','unknown') "
+                        f"AND NOT {FYI_CONTEXT_SQL} LIMIT 1", (target,)).fetchone())
+            if message["task"] and not fyi:
+                review_submission = context.get("review_submission")
+                message["context_pack"] = (self.store.review_packet(message["task"], review_submission)
+                                            if review_submission else
+                                            self.store.task_context(message["task"], compact=True))
             attempt = self.store.begin_attempt(message, self.generation)
             if not attempt:
                 continue

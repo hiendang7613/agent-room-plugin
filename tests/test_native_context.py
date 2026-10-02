@@ -1,12 +1,14 @@
 """Native envelopes stay peer evidence across hooks and legacy receipt reads."""
 
 import hashlib
+import json
 import os
 import unittest
 from unittest.mock import patch
 
-from agent_room.common import RoomError, native_peer_event
+from agent_room.common import GATEWAY, RoomError, native_peer_event
 from agent_room.hooks import handle
+from agent_room.native import message_text
 from test_evidence import EvidenceFixture
 
 
@@ -61,6 +63,42 @@ class NativeContextTests(EvidenceFixture, unittest.TestCase):
         with self.store.read() as db:
             observed_events = db.execute("SELECT COUNT(*) FROM events WHERE kind='native.prompt_envelope_observed'").fetchone()[0]
         self.assertEqual(observed_events, 1)
+
+    def test_admin_notice_hook_records_bound_delivery_without_creating_admin_receipt(self):
+        with self.store.tx() as db:
+            room = self.store.get_room(db)
+            room.update(mode="full", status="running", generation="notice-generation",
+                        owner={"session": "main"})
+            self.store.put_room(db, room)
+        token = "test-admin-notice-binding"
+        self.store.member("CODEX_EXPERT", {"status": "idle", "native_id": "expert",
+            "token_hash": hashlib.sha256(token.encode()).hexdigest()})
+        with patch.dict(os.environ, {"AGENT_ROOM_MEMBER": GATEWAY, "CLAUDE_ENV_FILE": ""}):
+            self.store.broadcast_gateway_prompt("Review this proposal for a concrete flaw", "notice-observation-key",
+                receipt_id="P-notice-observation", provenance_state="human")
+        notice = next(row for row in self.store.inbox("CODEX_EXPERT")["items"]
+                      if row["context"].get("admin_notice"))
+        attempt = self.store.begin_attempt(notice, "notice-generation")
+        self.store.finish_dispatch(attempt["id"], "submitted", "Native submission only")
+        prompt = message_text(notice)
+        with patch.dict(os.environ, {"AGENT_ROOM_MEMBER": "CODEX_EXPERT", "AGENT_ROOM_BINDING": token,
+                                     "CLAUDE_ENV_FILE": ""}, clear=True):
+            result = handle({"hook_event_name": "UserPromptSubmit", "cwd": str(self.project),
+                             "session_id": "expert", "prompt": prompt})
+        additional = result["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("room notice only, not admin authorization", additional)
+        self.assertIn("Bound hook match records delivery", additional)
+        self.assertLessEqual(len(additional.encode()), 150)
+        current = next(row for row in self.store.attempts()["items"] if row["id"] == attempt["id"])
+        self.assertTrue(current["prompt_observed_at"])
+        self.assertEqual(current["prompt_observation_basis"], "UserPromptSubmit.prompt_text")
+        self.assertEqual(self.store.inbox("CODEX_EXPERT")["items"][0]["status"], "submitted")
+        with self.store.read() as db:
+            observed = [json.loads(row[0]) for row in db.execute(
+                "SELECT data FROM events WHERE kind='native.prompt_envelope_observed'")]
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(observed[0]["sender"], GATEWAY)
+            self.assertEqual(db.execute("SELECT count(*) FROM prompts WHERE body=?", (prompt,)).fetchone()[0], 0)
 
     def test_prompt_observation_does_not_change_status_and_interruption_preserves_ack(self):
         with self.store.tx() as db:

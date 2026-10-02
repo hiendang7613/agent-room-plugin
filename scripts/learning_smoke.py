@@ -7,6 +7,7 @@ import time
 
 from agent_room.common import atomic_write
 from agent_room.knowledge import Knowledge
+from agent_room.store import DELIVERED_STATUSES
 
 
 PHASES = ("observe", "reuse", "revise")
@@ -27,6 +28,15 @@ SCOPE = {
     "retries": 0, "model_selection": "Existing native configuration; no override",
     "note": "Guided mechanism pilot, not autonomous-learning or memory-benefit benchmark. Model/tool steps and cost follow native settings; message/time bounds are not token or monetary caps.",
 }
+
+
+def delivery_settled(status, context):
+    """Require processing for work; native delivery is enough for an FYI copy."""
+    if isinstance(context, str):
+        context = json.loads(context)
+    if context.get("broadcast") or context.get("admin_relay"):
+        return status in DELIVERED_STATUSES
+    return status == "processed"
 
 
 class Deadline:
@@ -172,10 +182,24 @@ def run(store, command, wait, report):
             if Knowledge(store).show(original["id"]) != original:
                 raise RuntimeError("Learning changed across restart")
             report["learning"]["resumed_native_id"] = native_id
+    def deliveries_drained():
+        with store.read() as db:
+            messages = [dict(row) for row in db.execute("SELECT id,status,context FROM messages ORDER BY seq")]
+        if len(messages) > SCOPE["recipient_delivery_count"]:
+            raise RuntimeError("Learning pilot message budget exceeded; no further work is authorized")
+        return (len(messages) == SCOPE["recipient_delivery_count"] and
+                all(delivery_settled(message["status"], message["context"]) for message in messages))
+
+    wait(deliveries_drained,
+         f"all {SCOPE['recipient_delivery_count']} deliveries sent and actionable messages processed")
     with store.read() as db:
-        messages = [dict(row) for row in db.execute("SELECT id,sender,recipient,status FROM messages")]
-        if len(messages) != SCOPE["recipient_delivery_count"] or any(message["status"] != "processed" for message in messages):
-            raise RuntimeError("Learning pilot left extra or unprocessed messages")
+        messages = [dict(row) for row in db.execute("SELECT id,sender,recipient,status,context FROM messages")]
+        if len(messages) != SCOPE["recipient_delivery_count"] or any(
+                not delivery_settled(message["status"], message["context"]) for message in messages):
+            raise RuntimeError("Learning pilot left extra, undelivered or unprocessed actionable messages")
         if any(db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() for table in ("tasks", "notes", "approvals")):
             raise RuntimeError("Learning pilot changed task, decision or approval state")
+    for message in messages:
+        context = json.loads(message.pop("context"))
+        message["delivery_kind"] = "fyi" if context.get("broadcast") or context.get("admin_relay") else "actionable"
     report["learning"]["messages"] = messages

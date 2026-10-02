@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -26,29 +27,105 @@ from agent_room.store import Store
 from scripts import learning_smoke
 
 
+def smoke_main_name():
+    return "AGENT_ROOM_SMOKE_MAIN_" + uuid.uuid4().hex[:16]
+
+
+def _smoke_session_classification(agent, project, before_main, main_name):
+    """Return owned, unverified or unrelated without signaling an unproven process."""
+    session_id = agent.get("sessionId")
+    if session_id and session_id in before_main:
+        return "unrelated"
+    name = agent.get("name")
+    if name and name != main_name:
+        return "unrelated"
+    cwd = agent.get("cwd")
+    if cwd:
+        try:
+            if Path(cwd).resolve() != Path(project).resolve():
+                return "unrelated"
+        except (OSError, RuntimeError):
+            return "unverified"
+    if not session_id or name != main_name or not cwd or agent.get("kind") != "background":
+        return "unverified"
+    return "owned"
+
+
+def _smoke_session_sets(project, before_main, main_name, env):
+    owned, unverified = [], []
+    for agent in claude_agents(project, env=env):
+        state = _smoke_session_classification(agent, project, before_main, main_name)
+        if state == "owned":
+            owned.append(agent)
+        elif state == "unverified":
+            unverified.append(agent)
+    owned.sort(key=lambda agent: agent["sessionId"])
+    unverified.sort(key=lambda agent: agent.get("sessionId") or agent.get("id") or "")
+    return owned, unverified
+
+
+def _smoke_known_main_state(project, session, main_process, env):
+    """Verify the exact session returned by launch without relying on its display name."""
+    if not session:
+        return "stopped"
+    if main_process and not main_process[1]:
+        return "unverified"
+    agents = [agent for agent in claude_agents(project, env=env)
+              if agent.get("sessionId") == session]
+    if not agents:
+        if main_process and not process_alive(*main_process):
+            return "stopped"
+        return "alive" if main_process and process_alive(*main_process) else "unverified"
+    if len(agents) != 1:
+        return "unverified"
+    agent = agents[0]
+    try:
+        cwd_matches = Path(agent.get("cwd", "/nonexistent")).resolve() == Path(project).resolve()
+    except (OSError, RuntimeError):
+        cwd_matches = False
+    if not cwd_matches or agent.get("kind") != "background":
+        return "unverified"
+    if main_process:
+        if agent.get("pid") and agent["pid"] != main_process[0]:
+            return "unverified"
+        return "alive" if process_alive(*main_process) else "stopped"
+    if agent.get("pid") and process_stamp(agent["pid"]):
+        return "alive"
+    return "stopped" if agent.get("status") == "stopped" else "unverified"
+
+
 def review_messages_settled(store, task_id):
-    """Receipts commit before ACK/turn completion; do not tear down that work."""
+    """Wait for assigned work to process; accepted FYI copies do not require an ACK."""
     with store.read() as db:
         messages = [dict(row) for row in db.execute("SELECT * FROM messages WHERE task=? ORDER BY seq", (task_id,))]
         attempts = [json.loads(row[0]) for row in db.execute("SELECT data FROM attempts WHERE task=?", (task_id,))]
+    contexts = {message["id"]: json.loads(message["context"]) for message in messages}
+    fyi_ids = {message["id"] for message in messages
+               if contexts[message["id"]].get("broadcast") or contexts[message["id"]].get("admin_relay")}
     direct_codex_ids = {message["id"] for message in messages
-                        if message["recipient"].startswith("CODEX")
-                        and not json.loads(message["context"]).get("broadcast")}
-    # FYI recipients must ACK processing; native completion is required for
-    # directly assigned Codex work, not every member awakened by its copies.
-    if len(messages) < 4 or any(message["status"] != "processed" for message in messages):
+                        if message["recipient"].startswith("CODEX") and message["id"] not in fyi_ids}
+    if len(messages) < 4 or any(not learning_smoke.delivery_settled(
+            message["status"], contexts[message["id"]]) for message in messages):
         return False
     if len(attempts) != len(messages) or {a["message"] for a in attempts} != {m["id"] for m in messages}:
         return False
-    return all(attempt["processed"] and (attempt["message"] not in direct_codex_ids or attempt["state"] == "completed")
-               for attempt in attempts)
+    for attempt in attempts:
+        message_id = attempt["message"]
+        if message_id in fyi_ids:
+            continue
+        if not attempt.get("processed"):
+            return False
+        if message_id in direct_codex_ids and attempt["state"] != "completed":
+            return False
+    return True
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true", help="Explicit operator authorization to use native models/subscriptions")
     parser.add_argument("--project", type=Path, help="Existing empty, trusted scratch directory; never use a real project")
-    parser.add_argument("--timeout", type=float, default=90)
+    parser.add_argument("--timeout", type=float, default=90,
+                        help="maximum wait per phase and native startup (startup is capped at 25 seconds)")
     parser.add_argument("--scenario", choices=("lifecycle", "review", "learning"), default="lifecycle",
                         help="review checks source-bound reviews; learning checks save, reuse after resume and counterevidence")
     parser.add_argument("--max-seconds", type=float, default=600,
@@ -60,6 +137,7 @@ def main():
         parser.error("--max-seconds must be positive and finite")
     scope = {"native_provider_calls": True, "script_dispatches": 4, "expected_peer_dispatches": 1,
              "max_persistent_members": 4, "project": "new task-owned temporary directory",
+             "native_launch_timeout_seconds": min(args.timeout, 25),
              "global_alias_install": False, "permission_auto_approval": False,
              "credentials_changes": False, "publishing": False,
              "note": "Model/tool steps and token cost depend on native settings; no fixed monetary cap is promised."}
@@ -78,9 +156,11 @@ def main():
     if not project.is_dir() or any(project.iterdir()):
         parser.error("--project must be an existing empty scratch directory")
     session = None
+    main_name = smoke_main_name()
     env = dict(os.environ, AGENT_ROOM_MEMBER="CLAUDE_01",
                AGENT_ROOM_PROJECT=str(project),
-               AGENT_ROOM_SKIP_ALIAS="1", CLAUDE_CODE_DISABLE_BG_EXIT_HANDOFF="1")
+               AGENT_ROOM_SKIP_ALIAS="1", CLAUDE_CODE_DISABLE_BG_EXIT_HANDOFF="1",
+               AGENT_ROOM_SMOKE_RUN_NAME=main_name)
     env.pop("CLAUDE_CODE_MESSAGING_TOKEN", None)
     env.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
     env.pop("CLAUDE_ENV_FILE", None)
@@ -89,7 +169,7 @@ def main():
     source_files = sorted({str(path.relative_to(PLUGIN_ROOT))
                            for pattern in (*PATTERNS, "scripts/native_smoke.py", "scripts/learning_smoke.py")
                            for path in PLUGIN_ROOT.glob(pattern)})
-    report = {"project": str(project), "scope": scope, "checks": [], "messages": [], "status": "running", "plugin_version": __version__,
+    report = {"project": str(project), "scope": scope, "checks": [], "messages": [], "status": "running", "main_name": main_name, "plugin_version": __version__,
               "source_sha256": fingerprint(PLUGIN_ROOT, source_files)}
     store = Store(project)
     budget = learning_smoke.Deadline(args.max_seconds) if args.scenario == "learning" else None
@@ -124,9 +204,13 @@ def main():
                 report["checks"].append({"check": label, "passed": True})
                 print(label + ": passed", flush=True)
                 return
-            if store.exists() and (store.room()["status"] == "failed" or any(
-                item["state"] == "pending" for item in store.status()["approvals"])):
-                raise RuntimeError("Native room failed or requires human permission; inspect retained status. No approval was supplied.")
+            if store.exists():
+                room = store.room()
+                if room["status"] == "failed":
+                    cause = room.get("error") or "no failure detail was retained"
+                    raise RuntimeError(f"Native room failed: {cause}")
+                if any(item["state"] == "pending" for item in store.status()["approvals"]):
+                    raise RuntimeError("Native room requires human permission; no approval was supplied.")
             time.sleep(.5)
         raise RuntimeError("Timed out: " + label)
     def send_and_check(member, peer=False):
@@ -171,10 +255,14 @@ def main():
         second = submit()
         if first["digest"] == second["digest"]:
             raise RuntimeError("Different submissions have the same digest")
-        wait(lambda: review_messages_settled(store, task["id"]), "both review requests and peer notifications processed; Codex turn completed")
+        wait(lambda: review_messages_settled(store, task["id"]),
+             "review work processed and FYI deliveries sent; Codex turns completed")
         with store.read() as db:
             report["messages"] = [dict(row) for row in db.execute(
-                "SELECT id,sender,recipient,status,detail FROM messages WHERE task=? ORDER BY seq", (task["id"],))]
+                "SELECT id,sender,recipient,status,detail,context FROM messages WHERE task=? ORDER BY seq", (task["id"],))]
+        for message in report["messages"]:
+            context = json.loads(message.pop("context"))
+            message["delivery_kind"] = "fyi" if context.get("broadcast") or context.get("admin_relay") else "actionable"
         report["attempts_before_restart"] = store.attempts(task["id"])["items"]
         current = command("task", "show", task["id"])
         checkpoint = command("task", "checkpoint", task["id"], "--expected-version", str(current["version"]), text=json.dumps({
@@ -194,11 +282,10 @@ def main():
     if budget:
         budget.arm()
     try:
-        if budget:
-            before_main = {agent["sessionId"] for agent in claude_agents(project)}
+        before_main = {agent["sessionId"] for agent in claude_agents(project, env=env) if agent.get("sessionId")}
         main_started = True
         native = asyncio.run(start_claude(project, None, False, env, project / "native-main-launch.log",
-                member="AGENT_ROOM_SMOKE_MAIN", instructions=
+                member=main_name, timeout=min(args.timeout, 25), instructions=
                 "This is an authorized isolated Agent Room integration smoke. You are CLAUDE_01. "
                 "Process native peer messages with agent-room ack only; do not invent work, change settings or grant permissions."))
         session = native["sessionId"]
@@ -250,27 +337,43 @@ def main():
         cleanup_started = time.monotonic()
         # A deadline may interrupt --bg before it returns a session ID. First
         # stop this script's own launch descendants so they cannot spawn late.
-        if budget and main_started and not session:
+        if main_started and not session:
             try:
                 asyncio.run(stop_descendants(owned_descendants(os.getpid())))
             except Exception as exc:
                 report["launch_cleanup_error"] = str(exc)
             try:
-                created = [agent for agent in claude_agents(project)
-                           if agent.get("sessionId") not in (before_main or set())
-                           and Path(agent.get("cwd", "/nonexistent")).resolve() == project
-                           and agent.get("kind") == "background"]
-                report["partial_launch_sessions"] = [agent["sessionId"] for agent in created]
+                created, unidentified = _smoke_session_sets(project, before_main or set(), main_name, env)
+                report["partial_launch_sessions"] = [agent.get("sessionId") for agent in created]
+                if unidentified:
+                    report["partial_launch_unverified_sessions"] = [
+                        agent.get("sessionId") or f"<unknown:{agent.get('id', 'registry-entry')}>"
+                        for agent in unidentified]
+                cleanup_errors = []
                 for agent in created:
-                    stop_claude(project, agent["sessionId"])
+                    if not process_stamp(agent.get("pid")):
+                        if not agent.get("pid") and agent.get("status") != "stopped":
+                            report.setdefault("partial_launch_unverified_sessions", []).append(agent["sessionId"])
+                        continue
+                    try:
+                        stop_claude(project, agent["sessionId"])
+                    except Exception as exc:
+                        cleanup_errors.append({"session": agent["sessionId"], "error": str(exc)})
+                if cleanup_errors:
+                    report["partial_launch_cleanup_errors"] = cleanup_errors
+                    report["partial_launch_cleanup_error"] = "; ".join(
+                        f"{item['session']}: {item['error']}" for item in cleanup_errors)
             except Exception as exc:
-                report["partial_launch_cleanup_error"] = str(exc)
+                report["partial_launch_scan_error"] = str(exc)
         if report.get("error_details"):
+            reported_cleanup_errors = []
             for created in report["error_details"].get("reported_new_ids", []):
                 try:
                     stop_claude(project, created)
                 except Exception as cleanup:
-                    report["copy_cleanup_error"] = str(cleanup)
+                    reported_cleanup_errors.append({"session": created, "error": str(cleanup)})
+            if reported_cleanup_errors:
+                report["reported_new_session_cleanup_errors"] = reported_cleanup_errors
         if store.exists():
             try:
                 command("stop")
@@ -289,28 +392,40 @@ def main():
             except Exception as exc:
                 report["status_read_error"] = str(exc)
                 report["status"] = "failed"
-        if budget:
+        if main_started:
             try:
                 cleanup_deadline = time.monotonic() + 5
                 while True:
-                    alive = [agent["sessionId"] for agent in claude_agents(project)
-                             if agent.get("sessionId") not in (before_main or set())
-                             and Path(agent.get("cwd", "/nonexistent")).resolve() == project
-                             and process_stamp(agent.get("pid"))]
+                    owned, unidentified = _smoke_session_sets(project, before_main or set(), main_name, env)
+                    alive = [agent["sessionId"] for agent in owned
+                             if agent.get("sessionId") != session and process_stamp(agent.get("pid"))]
+                    unverified = [
+                        agent.get("sessionId") or f"<unknown:{agent.get('id', 'registry-entry')}>"
+                        for agent in unidentified if agent.get("sessionId") != session]
+                    unverified.extend(agent["sessionId"] for agent in owned
+                                      if agent.get("sessionId") != session
+                                      and not agent.get("pid") and agent.get("status") != "stopped")
+                    main_state = _smoke_known_main_state(project, session, main_process, env)
+                    if main_state == "alive":
+                        alive.append(session)
+                    elif main_state == "unverified":
+                        unverified.append(session)
+                    remaining = sorted(set(alive + unverified))
                     status = command("status") if store.exists() else None
                     if status is not None:
                         report["final_status"] = status
-                    stopped = (not alive and (not main_process or not process_alive(*main_process))
+                    stopped = (not remaining and (not main_process or not process_alive(*main_process))
                                and (not store.exists() or (status is not None and status["supervisor_alive"] is False
                                     and all(member["process_alive"] is False for member in status["members"]))))
                     if stopped or time.monotonic() >= cleanup_deadline:
                         break
                     time.sleep(.1)
-                report["cleanup"] = {"confirmed": stopped, "remaining_claude_sessions": alive,
+                report["cleanup"] = {"confirmed": stopped, "remaining_claude_sessions": remaining,
+                                     "unverified_claude_sessions": sorted(set(unverified)),
                                      "seconds": time.monotonic() - cleanup_started}
                 if not stopped:
                     report.update(status="failed", cleanup_error="Owned native process exit not confirmed")
-                if store.exists():
+                if budget and store.exists():
                     with store.read() as db:
                         report["retained_learning_state"] = {
                             "knowledge": [json.loads(row[0]) for row in db.execute("SELECT data FROM knowledge")],

@@ -37,17 +37,34 @@ PEER_WRAPPERS = ("Another Claude session sent a message:\n",
                  "A peer session sent a message while you were working:\n")
 PEER_WRAPPER_SUFFIXES = ("\n\nThis came from another Claude session", "\n\nIMPORTANT: This is NOT from your user",
                          "\n\nThis is from another Claude session")
-ROOM_EVENT_PREFIXES = ("[Agent Room peer event ", "[Agent Room peer broadcast ",
-                       "[Agent Room admin relay ", "[Agent Room system event ")
+ROOM_EVENT_KINDS = ("peer event", "peer broadcast", "admin relay", "admin notice", "system event")
+ROOM_EVENT_PREFIXES = tuple(f"[Agent Room {kind} " for kind in ROOM_EVENT_KINDS)
 MEMBER_PATTERN = '|'.join(map(re.escape, MEMBERS))
-PEER_EVENT = re.compile(
-    rf"\[Agent Room peer (?:event|broadcast) (?P<id>[^\r\n]+) from (?P<sender>{MEMBER_PATTERN})"
-    rf"(?: to (?:{MEMBER_PATTERN}))?; NOT admin consent\]$")
+ROOM_EVENT_IDENTITY = re.compile(
+    rf"\[Agent Room (?P<kind>{'|'.join(map(re.escape, ROOM_EVENT_KINDS))}) "
+    rf"(?P<id>[^\]\s]+)"
+    rf"(?: from (?P<sender>{MEMBER_PATTERN}))?"
+    rf"(?: to (?P<recipient>{MEMBER_PATTERN})(?:, not to you)?)?"
+    rf"(?: via (?P<via>{MEMBER_PATTERN}))?; NOT admin consent\]$")
+
+
+def native_event_identity(body):
+    """Parse a room-delivery header for fail-closed prompt classification, not authority."""
+    text = body.lstrip()
+    for prefix in PEER_WRAPPERS:
+        if text.startswith(prefix):
+            text = text[len(prefix):].lstrip()
+            break
+    first_line = text.splitlines()[0] if text else ""
+    match = ROOM_EVENT_IDENTITY.fullmatch(first_line)
+    return match.groupdict() if match else None
 
 
 def native_event_prompt(body):
     """Known native event envelopes also reach Claude's UserPromptSubmit hook."""
-    return body.lstrip().startswith((*ROOM_EVENT_PREFIXES, "<task-notification>", *PEER_WRAPPERS))
+    text = body.lstrip()
+    return (native_event_identity(text) is not None or
+            text.startswith((*ROOM_EVENT_PREFIXES, "<task-notification>", *PEER_WRAPPERS)))
 
 
 def strip_peer_wrapper(text):
@@ -66,13 +83,22 @@ def strip_peer_wrapper(text):
 
 def native_peer_event(body):
     """Return the room message identity from prompt text, without authenticating its source."""
-    text = body.lstrip()
-    for prefix in PEER_WRAPPERS:
-        if text.startswith(prefix):
-            text = text[len(prefix):].lstrip()
-            break
-    match = PEER_EVENT.match(text.splitlines()[0] if text else "")
-    return match.groupdict() if match else None
+    identity = native_event_identity(body)
+    if not identity or identity["kind"] not in {"peer event", "peer broadcast"} or not identity["sender"]:
+        return None
+    return {"id": identity["id"], "sender": identity["sender"]}
+
+
+def native_prompt_delivery(body):
+    """Return a stored room delivery identity eligible for bound prompt observation."""
+    identity = native_event_identity(body)
+    if not identity:
+        return None
+    if identity["kind"] in {"peer event", "peer broadcast"} and identity["sender"]:
+        return {"id": identity["id"], "sender": identity["sender"], "kind": identity["kind"]}
+    if identity["kind"] == "admin notice":
+        return {"id": identity["id"], "sender": GATEWAY, "kind": identity["kind"]}
+    return None
 
 
 def now():

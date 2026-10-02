@@ -1,0 +1,109 @@
+"""Native launch failures retain a local, inspectable diagnostic path."""
+
+import asyncio
+import tempfile
+from pathlib import Path
+import unittest
+from unittest.mock import patch
+
+from agent_room.common import RoomError
+from agent_room.native import start_claude
+from scripts.native_smoke import _smoke_known_main_state
+
+
+class FailedProcess:
+    returncode = 23
+
+    async def wait(self):
+        return self.returncode
+
+
+class NativeLaunchTests(unittest.TestCase):
+    def test_smoke_cleanup_rejects_duplicate_registry_identity_for_known_session(self):
+        with tempfile.TemporaryDirectory(prefix="native cleanup duplicate ") as directory:
+            project = Path(directory)
+            entry = {"sessionId": "known-session", "cwd": str(project),
+                     "kind": "background", "pid": 21}
+            with patch("scripts.native_smoke.claude_agents", return_value=[entry, dict(entry)]), \
+                    patch("scripts.native_smoke.process_alive", return_value=True):
+                state = _smoke_known_main_state(project, "known-session", (21, "stamp-21"), {})
+            self.assertEqual(state, "unverified")
+
+    def test_smoke_cleanup_rejects_wrong_cwd_for_known_session(self):
+        with tempfile.TemporaryDirectory(prefix="native cleanup project ") as directory, \
+                tempfile.TemporaryDirectory(prefix="native cleanup foreign ") as foreign:
+            project = Path(directory)
+            entry = {"sessionId": "known-session", "cwd": foreign,
+                     "kind": "background", "pid": 21}
+            with patch("scripts.native_smoke.claude_agents", return_value=[entry]), \
+                    patch("scripts.native_smoke.process_alive", return_value=True):
+                state = _smoke_known_main_state(project, "known-session", (21, "stamp-21"), {})
+            self.assertEqual(state, "unverified")
+
+    def test_smoke_cleanup_rejects_foreground_kind_for_known_session(self):
+        with tempfile.TemporaryDirectory(prefix="native cleanup foreground ") as directory:
+            project = Path(directory)
+            entry = {"sessionId": "known-session", "cwd": str(project),
+                     "kind": "foreground", "pid": 21}
+            with patch("scripts.native_smoke.claude_agents", return_value=[entry]), \
+                    patch("scripts.native_smoke.process_alive", return_value=True):
+                state = _smoke_known_main_state(project, "known-session", (21, "stamp-21"), {})
+            self.assertEqual(state, "unverified")
+
+    def test_smoke_cleanup_uses_captured_process_when_registry_pid_is_missing(self):
+        with tempfile.TemporaryDirectory(prefix="native cleanup missing registry pid ") as directory:
+            project = Path(directory)
+            entry = {"sessionId": "known-session", "cwd": str(project), "kind": "background"}
+            with patch("scripts.native_smoke.claude_agents", return_value=[entry]), \
+                    patch("scripts.native_smoke.process_alive", return_value=True):
+                state = _smoke_known_main_state(project, "known-session", (21, "stamp-21"), {})
+            self.assertEqual(state, "alive")
+
+            entry["status"] = "running"
+            with patch("scripts.native_smoke.claude_agents", return_value=[entry]):
+                state = _smoke_known_main_state(project, "known-session", None, {})
+            self.assertEqual(state, "unverified")
+
+    def test_smoke_cleanup_rejects_registry_pid_mismatch(self):
+        with tempfile.TemporaryDirectory(prefix="native cleanup identity ") as directory:
+            project = Path(directory)
+            registry = [{"sessionId": "known-session", "cwd": str(project),
+                         "kind": "background", "pid": 22}]
+            with patch("scripts.native_smoke.claude_agents", return_value=registry), \
+                    patch("scripts.native_smoke.process_alive", return_value=False):
+                state = _smoke_known_main_state(project, "known-session", (21, "stamp-21"), {})
+            self.assertEqual(state, "unverified")
+
+    def test_smoke_cleanup_rejects_missing_initial_process_stamp(self):
+        with tempfile.TemporaryDirectory(prefix="native cleanup stamp ") as directory:
+            project = Path(directory)
+            with patch("scripts.native_smoke.claude_agents") as agents:
+                state = _smoke_known_main_state(project, "known-session", (21, None), {})
+            self.assertEqual(state, "unverified")
+            agents.assert_not_called()
+
+    def test_failed_background_launch_reports_retained_member_log(self):
+        with tempfile.TemporaryDirectory(prefix="native launch ") as directory:
+            project = Path(directory)
+            log = project / ".agent-room" / "runtime" / "CLAUDE_EXPERT.log"
+
+            async def failed_launch(*args, **kwargs):
+                kwargs["stderr"].write("fixture native launch diagnostic\n")
+                kwargs["stderr"].flush()
+                return FailedProcess()
+
+            with patch("agent_room.native.claude_agents", return_value=[]), \
+                    patch("agent_room.native.asyncio.create_subprocess_exec", new=failed_launch):
+                with self.assertRaises(RoomError) as caught:
+                    asyncio.run(start_claude(project, None, False, {"PATH": "/usr/bin"}, log,
+                                             member="CLAUDE_EXPERT"))
+
+            self.assertEqual(caught.exception.code, "native")
+            self.assertEqual(caught.exception.details["returncode"], 23)
+            self.assertEqual(caught.exception.details["log_path"], str(log.resolve()))
+            self.assertIn(str(log.resolve()), str(caught.exception))
+            self.assertIn("fixture native launch diagnostic", log.read_text())
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -120,6 +120,135 @@ class StoreTests(unittest.TestCase):
         self.assertIn("conflict", results)
         self.assertEqual(len(self.store.status()["claims"]), 1)
 
+    def test_create_can_claim_only_its_own_scoped_implementation_task_atomically(self):
+        task = self.store.create_task("CLAUDE_01", {
+            "title": "Implement scoped change", "request": "Change src/new.py", "acceptance": "Check passes",
+            "next": "Inspect the current implementation", "owner": "CLAUDE_01", "source": self.prompt,
+            "authority": "implementation", "scope": ["src/new.py"]}, claim=True)
+        self.assertEqual(task["task"]["state"], "running")
+        self.assertEqual(task["task"]["version"], 2)
+        self.assertEqual(task["claim"]["task"], task["task"]["id"])
+        self.assertEqual(task["claim"]["paths"], ["src/new.py"])
+        self.assertEqual(self.store.status()["claims"][0]["token"], task["claim"]["token"])
+
+        before = len(self.store.status()["tasks"])
+        with self.assertRaises(RoomError) as caught:
+            self.store.create_task("CLAUDE_01", {
+                "title": "Claim another member's work", "request": "Change src/other.py", "acceptance": "Check passes",
+                "next": "Inspect", "owner": "CODEX_EXPERT", "source": self.prompt,
+                "authority": "implementation", "scope": ["src/other.py"]}, claim=True)
+        self.assertEqual(caught.exception.code, "authority")
+        self.assertEqual(len(self.store.status()["tasks"]), before)
+
+        for label, override in (
+                ("analysis authority", {"authority": "analysis"}),
+                ("missing scope", {"scope": []})):
+            with self.subTest(label=label):
+                before = {item["id"] for item in self.store.status()["tasks"]}
+                claims_before = self.store.status()["claims"]
+                with self.assertRaises(RoomError) as caught:
+                    self.store.create_task("CLAUDE_01", {
+                        "title": "Invalid quick claim", "request": "Review without writing",
+                        "acceptance": "The task is not created", "next": "Explain the limit",
+                        "owner": "CLAUDE_01", "source": self.prompt, "authority": "implementation",
+                        "scope": ["src/invalid.py"]} | override, claim=True)
+                self.assertEqual(caught.exception.code, "authority")
+                self.assertEqual({item["id"] for item in self.store.status()["tasks"]}, before)
+                self.assertEqual(self.store.status()["claims"], claims_before)
+
+    def test_claim_enforces_owner_implementation_and_explicit_scope(self):
+        unowned = self.task(owner="CODEX_EXPERT", scope=["src/unowned.py"])
+        analysis = self.store.create_task("CLAUDE_01", {
+            "title": "Analyze only", "request": "Explore the option", "acceptance": "No write is authorized",
+            "next": "Share findings", "owner": "CLAUDE_01", "source": self.prompt,
+            "authority": "analysis", "scope": ["src/analysis.py"]})
+        unscoped = self.store.create_task("CLAUDE_01", {
+            "title": "Unscoped", "request": "Inspect the project", "acceptance": "Scope must be named",
+            "next": "Identify files", "owner": "CLAUDE_01", "source": self.prompt,
+            "authority": "implementation", "scope": []})
+
+        for label, task in (("another owner", unowned), ("analysis authority", analysis),
+                            ("empty scope", unscoped)):
+            with self.subTest(label=label):
+                with self.assertRaises(RoomError) as caught:
+                    self.store.claim("CLAUDE_01", task["id"], task["version"])
+                self.assertEqual(caught.exception.code, "authority")
+                self.assertEqual(self.store.status()["claims"], [])
+                current = next(item for item in self.store.status()["tasks"] if item["id"] == task["id"])
+                self.assertEqual(current["state"], "ready")
+
+    def test_create_claim_conflict_rolls_back_new_task(self):
+        existing = self.task(scope=["src"])
+        self.store.claim("CLAUDE_01", existing["id"], existing["version"])
+        before = {task["id"] for task in self.store.status()["tasks"]}
+        with self.assertRaises(RoomError) as caught:
+            self.store.create_task("CLAUDE_01", {
+                "title": "Overlapping change", "request": "Change src/a.py", "acceptance": "Check passes",
+                "next": "Inspect", "owner": "CLAUDE_01", "source": self.prompt,
+                "authority": "implementation", "scope": ["src/a.py"]}, claim=True)
+        self.assertEqual(caught.exception.code, "conflict")
+        self.assertEqual({task["id"] for task in self.store.status()["tasks"]}, before)
+        self.assertEqual(len(self.store.status()["claims"]), 1)
+
+    def test_task_update_combines_ack_only_for_same_pending_direct_task_message(self):
+        task = self.task()
+        message = self.store.send("CODEX_EXPERT", "CLAUDE_01", "Apply this task clarification", task["id"])
+        updated = self.store.update_task("CLAUDE_01", task["id"], task["version"],
+                                         {"checkpoint": "Applied the clarification"}, ack_id=message["id"])
+        self.assertEqual(updated["processed_message"], message["id"])
+        self.assertEqual(self.store.inbox("CLAUDE_01", pending=True)["items"], [])
+        with self.store.read() as db:
+            row = db.execute("SELECT status,detail FROM messages WHERE id=?", (message["id"],)).fetchone()
+        self.assertEqual(row["status"], "processed")
+        self.assertIn(task["id"], row["detail"])
+
+    def test_combined_ack_rejects_already_processed_message_and_rolls_back_update(self):
+        task = self.task()
+        message = self.store.send("CODEX_EXPERT", "CLAUDE_01", "Apply this task clarification", task["id"])
+        self.store.acknowledge("CLAUDE_01", message["id"], "Read and applied before the task update")
+
+        with self.assertRaises(RoomError) as caught:
+            self.store.update_task("CLAUDE_01", task["id"], task["version"],
+                                   {"next": "This update must roll back"}, ack_id=message["id"])
+
+        self.assertEqual(caught.exception.code, "conflict")
+        with self.store.read() as db:
+            current_task = self.store.record(db, "tasks", task["id"])
+            current_message = dict(db.execute("SELECT status,detail FROM messages WHERE id=?",
+                                               (message["id"],)).fetchone())
+        self.assertEqual(current_task["next"], task["next"])
+        self.assertEqual(current_task["version"], task["version"])
+        self.assertEqual(current_message["status"], "processed")
+        self.assertEqual(current_message["detail"], "Read and applied before the task update")
+
+    def test_failed_combined_ack_rolls_back_task_update_and_does_not_ack_other_task(self):
+        task = self.task()
+        other = self.task(scope=["src/other.py"])
+        unrelated = self.store.send("CODEX_EXPERT", "CLAUDE_01", "Clarification for another task", other["id"])
+        with self.assertRaises(RoomError) as caught:
+            self.store.update_task("CLAUDE_01", task["id"], task["version"],
+                                   {"checkpoint": "Must roll back"}, ack_id=unrelated["id"])
+        self.assertEqual(caught.exception.code, "conflict")
+        with self.store.read() as db:
+            current = self.store.record(db, "tasks", task["id"])
+        self.assertEqual(current["checkpoint"], "")
+        pending = self.store.inbox("CLAUDE_01", pending=True)["items"]
+        self.assertEqual([row["id"] for row in pending], [unrelated["id"]])
+
+    def test_combined_ack_rejects_fyi_copy_and_rolls_back_task_update(self):
+        task = self.task()
+        self.store.send("CODEX_01", "CODEX_EXPERT", "An FYI copied to the task owner", task["id"])
+        copied = next(row for row in self.store.inbox("CLAUDE_01")["items"]
+                      if row["context"].get("broadcast"))
+        with self.assertRaises(RoomError) as caught:
+            self.store.update_task("CLAUDE_01", task["id"], task["version"],
+                                   {"checkpoint": "Must not change"}, ack_id=copied["id"])
+        self.assertEqual(caught.exception.code, "conflict")
+        with self.store.read() as db:
+            current = self.store.record(db, "tasks", task["id"])
+        self.assertEqual(current["checkpoint"], "")
+        self.assertEqual(self.store.inbox("CLAUDE_01", pending=True)["items"], [])
+
     def test_stale_update_and_done_require_evidence(self):
         task = self.task()
         changed = self.store.update_task("CLAUDE_01", task["id"], 1, {"checkpoint": "Read source"})

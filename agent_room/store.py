@@ -38,6 +38,15 @@ PROTECTED_USES = frozenset({"native_approval", "task_create_implementation", "ta
                             "task_cancel_or_reopen", "note_admin", "knowledge_admin", "message_retry"})
 UNPROTECTED_USES = frozenset({"account", "task_create_analysis"})
 MAX_MESSAGE_ID_BYTES = 64
+MAX_MESSAGE_CHARS = 16000
+ADMIN_NOTICE_PROVENANCE = frozenset({"human", "non_human", "unverified", "manual_recovery"})
+# Broadcast copies and admin relays are FYI history. They do not create recipient ACK work.
+FYI_CONTEXT_SQL = "(json_extract(context, '$.broadcast.id') IS NOT NULL OR COALESCE(json_extract(context, '$.admin_relay'), 0) = 1)"
+ACTIONABLE_PENDING_SQL = f"(status != 'processed' AND NOT {FYI_CONTEXT_SQL})"
+DELIVERED_STATUSES = frozenset({"accepted", "submitted", "processed"})
+# O3 review-packet cap (2026-10-01): 1,500 bytes keeps three paths and eight bounded
+# evidence claims useful for common reviews; FYI copies never receive this packet.
+MAX_REVIEW_PACKET_BYTES = 1500
 TASK_STATES = {"ready", "running", "blocked", "review", "done", "cancelled"}
 NOTE_STATES = {
     "question": {"open", "answered", "superseded"},
@@ -295,7 +304,7 @@ class Store:
             db.execute("UPDATE prompts SET accounted=? WHERE id=?",
                        (dumps({"disposition": disposition, "refs": refs}), prompt_id))
 
-    def create_task(self, actor, data):
+    def create_task(self, actor, data, *, claim=False):
         self.main_only(actor)
         if data.keys() - {"title", "request", "acceptance", "next", "owner", "source", "authority", "scope", "dependencies", "review_policy", "reviewer"}:
             raise RoomError("Unsupported task creation fields")
@@ -307,6 +316,8 @@ class Store:
         if authority not in {"analysis", "implementation"}:
             raise RoomError("authority must be analysis or implementation")
         paths = [scoped_path(self.project, path) for path in data.get("scope", [])]
+        if claim and (data["owner"] != actor or authority != "implementation" or not paths):
+            raise RoomError("--claim requires the creator to own an implementation task with explicit scope", "authority")
         with self.tx() as db:
             self.source(db, data["source"], "task_create_implementation" if authority == "implementation" else "task_create_analysis")
             room = self.get_room(db)
@@ -323,11 +334,12 @@ class Store:
                         submission=None, checkpoint_id=None, contract_revision=1, last_progress=now())
             db.execute("INSERT INTO tasks VALUES (?,?,?)", (task["id"], 1, dumps(task)))
             self.event(db, "task.created", {"id": task["id"], "actor": actor})
+            writer_claim = self._claim(db, actor, task, task["version"]) if claim else None
             if task["owner"] != actor:
                 self.notify(db, actor, task["owner"], "New assigned task. Read the task and current decisions before acting.", task["id"])
-        return task
+        return {"task": task, "claim": writer_claim} if claim else task
 
-    def update_task(self, actor, task_id, expected, changes):
+    def update_task(self, actor, task_id, expected, changes, *, ack_id=None):
         validate_fields(changes, ("state", "checkpoint", "next", "blocked_reason", "owner", "authority", "acceptance", "request", "source"), ("evidence", "scope"))
         if "snapshot" in changes:
             snapshot = changes["snapshot"]
@@ -393,28 +405,38 @@ class Store:
                     if task_id in dependent["dependencies"] and dependent["state"] not in {"done", "cancelled"}:
                         self.notify(db, actor, dependent["owner"], f"Dependency {task_id} completed. Reconcile all remaining dependencies and blockers before continuing.", dependent["id"])
             self.event(db, "task.updated", {"id": task_id, "version": task["version"], "actor": actor})
-        return task
+            if ack_id is not None:
+                self._acknowledge(db, actor, ack_id,
+                                  f"Processed with successful task update {task_id}.", expected_task=task_id)
+                result = dict(task, processed_message=ack_id)
+            else:
+                result = task
+        return result
+
+    def _claim(self, db, actor, task, expected):
+        task_id = task["id"]
+        if actor != task["owner"] or task["authority"] != "implementation" or not task["scope"]:
+            raise RoomError("A writer needs an assigned implementation task with explicit scope", "authority")
+        if task["version"] != expected or task["state"] not in {"ready", "running"}:
+            raise RoomError("Read the current actionable task before claiming", "conflict")
+        self.require_ready(db, task)
+        for row in db.execute("SELECT * FROM claims"):
+            if row["task"] == task_id:
+                return dict(row, paths=json.loads(row["paths"]))
+            if any(overlaps(a, b) for a in task["scope"] for b in json.loads(row["paths"])):
+                raise RoomError("Another task owns an overlapping path", "conflict", task=row["task"])
+        token = uid()
+        db.execute("INSERT INTO claims VALUES (?,?,?,?)", (task_id, actor, token, dumps(task["scope"])))
+        task["state"] = "running"
+        task["last_progress"] = now()
+        self.save(db, "tasks", task, expected)
+        self.event(db, "writer.claimed", {"task": task_id, "owner": actor})
+        return {"task": task_id, "owner": actor, "token": token, "paths": task["scope"], "version": task["version"]}
 
     def claim(self, actor, task_id, expected):
         with self.tx() as db:
             task = self.record(db, "tasks", task_id)
-            if actor != task["owner"] or task["authority"] != "implementation" or not task["scope"]:
-                raise RoomError("A writer needs an assigned implementation task with explicit scope", "authority")
-            if task["version"] != expected or task["state"] not in {"ready", "running"}:
-                raise RoomError("Read the current actionable task before claiming", "conflict")
-            self.require_ready(db, task)
-            for row in db.execute("SELECT * FROM claims"):
-                if row["task"] == task_id:
-                    return dict(row, paths=json.loads(row["paths"]))
-                if any(overlaps(a, b) for a in task["scope"] for b in json.loads(row["paths"])):
-                    raise RoomError("Another task owns an overlapping path", "conflict", task=row["task"])
-            token = uid()
-            db.execute("INSERT INTO claims VALUES (?,?,?,?)", (task_id, actor, token, dumps(task["scope"])))
-            task["state"] = "running"
-            task["last_progress"] = now()
-            self.save(db, "tasks", task, expected)
-            self.event(db, "writer.claimed", {"task": task_id, "owner": actor})
-            return {"task": task_id, "owner": actor, "token": token, "paths": task["scope"], "version": task["version"]}
+            return self._claim(db, actor, task, expected)
 
     def release(self, actor, task_id, token):
         with self.tx() as db:
@@ -464,7 +486,7 @@ class Store:
         receipt = receipts[-1]
         return dict(result, state="approved" if receipt["verdict"] == "approve" else receipt["verdict"], receipt=receipt["id"])
 
-    def submit_task(self, actor, task_id, expected, data):
+    def submit_task(self, actor, task_id, expected, data, *, ack_id=None):
         if data.keys() - {"paths", "evidence", "summary"}:
             raise RoomError("Submission accepts only paths, evidence and summary; the store owns source hashes")
         nonempty_strings(data.get("evidence"), "evidence")
@@ -494,10 +516,17 @@ class Store:
             db.execute("DELETE FROM claims WHERE task=? AND owner=?", (task_id, actor))
             self.event(db, "task.submitted", {"task": task_id, "submission": submission["id"], "actor": actor})
             if task["reviewer"]:
-                self.notify(db, actor, task["reviewer"], f"Review submission {submission['id']}. Read its source digest and current task context; record a review receipt after checking the listed files and acceptance evidence.", task_id)
-            return {"task": task, "submission": submission}
+                self.notify(db, actor, task["reviewer"],
+                            f"Review submission {submission['id']} is ready. Inspect the listed files and acceptance; only {task['reviewer']} records its source-bound receipt.",
+                            task_id, review_submission=submission["id"])
+            result = {"task": task, "submission": submission}
+            if ack_id is not None:
+                self._acknowledge(db, actor, ack_id,
+                                  f"Processed with successful task submission {task_id}.", expected_task=task_id)
+                result["processed_message"] = ack_id
+            return result
 
-    def record_review(self, actor, submission_id, data):
+    def record_review(self, actor, submission_id, data, *, ack_id=None):
         if data.keys() - {"source_digest", "verdict", "summary", "findings", "evidence"}:
             raise RoomError("Unsupported review fields")
         nonempty_strings(data.get("evidence"), "review evidence")
@@ -535,7 +564,13 @@ class Store:
             if old:
                 previous = json.loads(old[0])
                 if all(previous.get(key) == data.get(key) for key in ("source_digest", "verdict", "summary", "findings", "evidence")):
-                    return previous
+                    result = previous
+                    if ack_id is not None:
+                        self._acknowledge(db, actor, ack_id,
+                                          f"Processed with successful review record {submission_id}.",
+                                          expected_task=task["id"], allow_identical=True)
+                        result = dict(previous, processed_message=ack_id)
+                    return result
                 raise RoomError("Review receipts are immutable; author must resubmit after reconciling findings", "conflict")
             receipt = dict(data, id=uid("R-"), submission=submission_id, task=task["id"], reviewer=actor, created=now())
             db.execute("INSERT INTO reviews VALUES (?,?,?)", (receipt["id"], submission_id, dumps(receipt)))
@@ -544,6 +579,10 @@ class Store:
             self.event(db, "review.recorded", {"task": task["id"], "review": receipt["id"], "verdict": verdict, "actor": actor})
             for recipient in {task["owner"], GATEWAY} - {actor}:
                 self.notify(db, actor, recipient, f"Review {receipt['id']}: {verdict}. Read findings and current source before the next action; task completion remains separate.", task["id"])
+            if ack_id is not None:
+                self._acknowledge(db, actor, ack_id,
+                                  f"Processed with successful review record {submission_id}.", expected_task=task["id"])
+                return dict(receipt, processed_message=ack_id)
             return receipt
 
     def checkpoint(self, actor, task_id, expected, data):
@@ -637,6 +676,61 @@ class Store:
                                "truncated": True, "rule": context["rule"], "full_record_commands": context["full_record_commands"]}
             preview["digest"] = digest(preview)
             return preview
+
+    def review_packet(self, task_id, submission_id):
+        """Return a bounded snapshot for one assigned review, or pointers when it is stale/large."""
+        with self.read() as db:
+            task = self.record(db, "tasks", task_id)
+            submission = self.entry(db, "submissions", submission_id)
+            if submission["task"] != task_id:
+                raise RoomError("Review packet submission belongs to another task", "conflict")
+            review = self.review_status(db, task)
+            current = (task["submission"] == submission_id and task["state"] == "review"
+                       and review["state"] == "pending")
+            commands = [f"agent-room task context {task_id}", f"agent-room submission show {submission_id}"]
+            if current:
+                paths = sorted(submission["snapshot"])
+                evidence = submission["evidence"]
+                acceptance = task["acceptance"]
+                # Keep omitted source/path/count fields distinct from intentionally shortened evidence previews;
+                # the preview flag is informational so routine long claims do not force a full-record read.
+                truncated = (len(paths) > 12 or any(len(path) > 80 for path in paths)
+                             or len(evidence) > 12 or len(acceptance) > 140)
+                packet = {
+                    "status": "current", "task": {"id": task_id, "version": task["version"],
+                             "owner": task["owner"], "reviewer": task["reviewer"],
+                             "acceptance": bounded(acceptance, 140)},
+                    "submission": {"id": submission_id, "source_digest": submission["digest"],
+                                   "paths": bounded(paths, 80),
+                                   "author_evidence_preview": [item[:80] + ("..." if len(item) > 80 else "")
+                                                               for item in evidence[:12]],
+                                   "author_evidence_preview_truncated": any(len(item) > 80 for item in evidence[:12]),
+                                   "evidence_count": len(evidence)},
+                }
+                if truncated:
+                    packet["truncated"] = True
+                    packet["full_record_commands"] = commands
+            else:
+                packet = {
+                    "status": "stale", "truncated": True,
+                    "task": {"id": task_id, "version": task["version"], "state": task["state"],
+                             "reviewer": task["reviewer"]},
+                    "submission": {"id": submission_id, "source_digest": submission["digest"]},
+                    "full_record_commands": commands,
+                }
+            packet["digest"] = digest(packet)
+            if len(dumps(packet).encode("utf-8")) > MAX_REVIEW_PACKET_BYTES:
+                packet = {
+                    "status": "truncated", "truncated": True,
+                    "task": {"id": task_id, "version": task["version"], "state": task["state"],
+                             "reviewer": task["reviewer"]},
+                    "submission": {"id": submission_id, "source_digest": submission["digest"]},
+                    "full_record_commands": commands,
+                }
+                packet["digest"] = digest(packet)
+            if len(dumps(packet).encode("utf-8")) > MAX_REVIEW_PACKET_BYTES:
+                raise RoomError("Bounded review packet exceeds the existing context budget", "invalid")
+            return packet
 
     @staticmethod
     def _note_preview(note, *, terms=()):
@@ -779,7 +873,7 @@ class Store:
                     review = self.review_status(db, task)
                     if review["state"] == "pending":
                         recipients[task["reviewer"]] = (f"Your review of submission {review['submission']} is still pending. "
-                            "Read the current task context, submission and source before recording a review receipt.")
+                            "Use the review packet, inspect the actual source, and record a receipt only if it is current.")
                 for member, body in recipients.items():
                     if member not in MODES[room["mode"]]:
                         continue
@@ -791,14 +885,17 @@ class Store:
                         continue
                     self.notify(db, GATEWAY, member,
                                "Room resumed. " + body + " Do not replay effects of unknown outcome.", task["id"],
-                               broadcast=False)
+                               broadcast=False,
+                               review_submission=review["submission"] if task["state"] == "review" and member == task.get("reviewer") else None)
 
     def queue(self, db, sender, recipient, body, task_id=None, message_id=None, *, knowledge_id=None, kind=None,
-              admin_relay=False, broadcast_id=None, broadcast_recipient=None):
-        if sender not in MEMBERS or recipient not in MEMBERS or not isinstance(body, str) or not body.strip():
+              admin_relay=False, admin_notice=None, broadcast_id=None, broadcast_recipient=None,
+              review_submission=None):
+        if (sender not in MEMBERS or recipient not in MEMBERS or not isinstance(body, str) or
+                (not body.strip() and admin_notice is None)):
             raise RoomError("Message requires a known recipient and nonempty body")
-        if len(body) > 16000:
-            raise RoomError("Keep messages under 16000 characters; link longer findings")
+        if len(body) > MAX_MESSAGE_CHARS:
+            raise RoomError(f"Keep messages under {MAX_MESSAGE_CHARS} characters; link longer findings")
         message_id = message_id or uid("M-")
         if not isinstance(message_id, str):
             raise RoomError("Message ID must be text")
@@ -812,12 +909,15 @@ class Store:
             old_knowledge = old_context.get("knowledge", {}).get("id")
             old_kind = old_context.get("kind", "task" if old["task"] else "peer")
             old_admin_relay = old_context.get("admin_relay", False)
+            old_admin_notice = old_context.get("admin_notice", {})
             old_broadcast = old_context.get("broadcast", {})
+            old_review_submission = old_context.get("review_submission")
             wanted_broadcast = ({"id": broadcast_id, "direct_recipient": broadcast_recipient}
                                 if broadcast_id else {})
+            wanted_admin_notice = admin_notice or {}
             if (old["sender"], old["recipient"], old["task"], old["body"], old_knowledge, old_kind,
-                old_admin_relay, old_broadcast) != (sender, recipient, task_id, body, knowledge_id, kind,
-                                                     admin_relay, wanted_broadcast):
+                old_admin_relay, old_admin_notice, old_broadcast, old_review_submission) != (sender, recipient, task_id, body,
+                    knowledge_id, kind, admin_relay, wanted_admin_notice, wanted_broadcast, review_submission):
                 raise RoomError("Message ID reused with different content", "conflict")
             return dict(old)
         try:
@@ -827,15 +927,38 @@ class Store:
         if (not message_id_bytes or len(message_id_bytes) > MAX_MESSAGE_ID_BYTES or
                 not all(char.isalnum() or char in "._-" for char in message_id)):
             raise RoomError(f"Message ID must use letters, digits, dot, underscore or hyphen (max {MAX_MESSAGE_ID_BYTES} bytes)")
+        validated_admin_notice = None
+        if admin_notice is not None:
+            if (not admin_relay or task_id is not None or knowledge_id is not None or broadcast_id is not None or
+                    review_submission is not None or not isinstance(admin_notice, dict) or
+                    set(admin_notice) != {"receipt", "provenance", "truncated", "original_chars"}):
+                raise RoomError("Admin notice metadata requires an admin relay")
+            receipt = admin_notice.get("receipt")
+            provenance = admin_notice.get("provenance")
+            truncated = admin_notice.get("truncated")
+            original_chars = admin_notice.get("original_chars")
+            if (not isinstance(receipt, str) or not receipt or not receipt.isascii() or len(receipt) > MAX_MESSAGE_ID_BYTES or
+                    not isinstance(provenance, str) or provenance not in ADMIN_NOTICE_PROVENANCE or
+                    type(truncated) is not bool or type(original_chars) is not int or original_chars < len(body) or
+                    truncated != (original_chars > MAX_MESSAGE_CHARS) or len(body) != min(original_chars, MAX_MESSAGE_CHARS)):
+                raise RoomError("Admin notice metadata does not match its copied prompt")
+            validated_admin_notice = dict(admin_notice)
         context = {}
         if task_id:
             task = self.record(db, "tasks", task_id)
             context = {"task_version": task["version"], "decisions": task["decisions"]}
+        if review_submission is not None:
+            submission = self.entry(db, "submissions", review_submission)
+            if not task_id or submission["task"] != task_id:
+                raise RoomError("Review request must reference a submission for its task", "conflict")
+            context["review_submission"] = review_submission
         if knowledge_id is not None:
             knowledge = self.record(db, "knowledge", knowledge_id)
             context["knowledge"] = {"id": knowledge["id"], "version": knowledge["version"]}
         if admin_relay:
             context["admin_relay"] = True
+        if validated_admin_notice is not None:
+            context["admin_notice"] = validated_admin_notice
         if broadcast_id:
             if broadcast_recipient not in MEMBERS:
                 raise RoomError("Broadcast copy requires a direct room recipient")
@@ -846,21 +969,25 @@ class Store:
                    (message_id, sender, recipient, task_id, body, dumps(context), "queued", now()))
         return dict(db.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone())
 
-    def fanout(self, db, message, sender, recipient, body, task_id=None, knowledge_id=None, kind="peer"):
+    def fanout(self, db, message, sender, recipient, body, task_id=None, knowledge_id=None, kind="peer",
+               review_submission=None):
         """Queue the same member message for every other room member in the caller's transaction."""
         targets = [name for name in MEMBERS if name != sender]
         for target in targets:
             if target != recipient:
                 self.queue(db, sender, target, body, task_id, knowledge_id=knowledge_id, kind=kind,
-                           broadcast_id=message["id"], broadcast_recipient=recipient)
+                           broadcast_id=message["id"], broadcast_recipient=recipient,
+                           review_submission=review_submission)
         self.event(db, "message.broadcast", {"message": message["id"], "sender": sender, "members": targets})
         return targets
 
-    def notify(self, db, sender, recipient, body, task_id=None, *, broadcast=True):
+    def notify(self, db, sender, recipient, body, task_id=None, *, broadcast=True, review_submission=None):
         """Queue a member-triggered room notice, fanning it out unless it is transport diagnostics."""
-        message = self.queue(db, sender, recipient, body, task_id, kind="system")
+        message = self.queue(db, sender, recipient, body, task_id, kind="system",
+                             review_submission=review_submission)
         if broadcast:
-            self.fanout(db, message, sender, recipient, body, task_id, kind="system")
+            self.fanout(db, message, sender, recipient, body, task_id, kind="system",
+                        review_submission=review_submission)
         return message
 
     def notice(self, sender, recipient, body):
@@ -875,20 +1002,39 @@ class Store:
                 self.fanout(db, message, actor, recipient, body, task_id, knowledge_id, "task" if task_id else "peer")
             return message
 
-    def broadcast_gateway_prompt(self, body, key):
+    def broadcast_gateway_prompt(self, body, key, *, receipt_id, provenance_state):
         """Queue gateway prompt text to every non-gateway member; its content never grants worker authority."""
         self.main_only(GATEWAY)
-        if not isinstance(key, str) or not key:
+        if not isinstance(key, str) or not key or not isinstance(receipt_id, str) or not receipt_id:
             raise RoomError("Admin notification requires a stable prompt key")
+        if (not isinstance(body, str) or not body.strip() or not isinstance(provenance_state, str) or
+                provenance_state not in ADMIN_NOTICE_PROVENANCE):
+            raise RoomError("Admin notification requires prompt text and its observed provenance state")
         key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
         targets = [name for name in MEMBERS if name != GATEWAY]
+        copied_body = body[:MAX_MESSAGE_CHARS]
+        admin_notice = {"receipt": receipt_id, "provenance": provenance_state,
+                        "truncated": len(body) > MAX_MESSAGE_CHARS, "original_chars": len(body)}
         with self.tx() as db:
             inserted = False
             for target in targets:
                 child = hashlib.sha256(f"{key_hash}\0{target}".encode("utf-8")).hexdigest()[:36]
                 message_id = "M-" + child
-                inserted = inserted or not db.execute("SELECT 1 FROM messages WHERE id=?", (message_id,)).fetchone()
-                self.queue(db, GATEWAY, target, body, message_id=message_id, admin_relay=True)
+                old = db.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+                if old:
+                    old_context = json.loads(old["context"])
+                    old_notice = old_context.get("admin_notice")
+                    if ((old["sender"], old["recipient"], old["task"], old["body"],
+                         old_context.get("admin_relay", False)) != (GATEWAY, target, None, copied_body, True) or
+                            (old_notice and (old_notice.get("truncated"), old_notice.get("original_chars")) !=
+                             (admin_notice["truncated"], admin_notice["original_chars"]))):
+                        raise RoomError("Message ID reused with different content", "conflict")
+                    # A repeated hook may produce a fresh receipt after the host writes its transcript row.
+                    # Keep the first notice's receipt/provenance for this stable prompt key; never rewrite a sent copy.
+                    continue
+                self.queue(db, GATEWAY, target, copied_body, message_id=message_id, admin_relay=True,
+                           admin_notice=admin_notice)
+                inserted = True
             if inserted:
                 self.event(db, "gateway.message.broadcast", {"key_hash": key_hash, "members": targets})
             room = self.get_room(db)
@@ -915,8 +1061,8 @@ class Store:
     def inbox(self, actor, after=0, limit=50, *, pending=False, compact=False):
         if after < 0 or not 1 <= limit <= 200:
             raise RoomError("Use after >= 0 and limit 1..200")
-        # Filter before pagination; accepted/submitted/unknown are still unprocessed.
-        selection = " AND status!='processed'" if pending else ""
+        # Successful FYI deliveries remain in history without creating ACK work; failed ones are reported separately.
+        selection = f" AND {ACTIONABLE_PENDING_SQL}" if pending else ""
         with self.read() as db:
             rows = [dict(row) for row in db.execute(
                 f"SELECT * FROM messages WHERE recipient=? AND seq>?{selection} ORDER BY seq LIMIT ?", (actor, after, limit+1))]
@@ -933,18 +1079,33 @@ class Store:
                     row["read_command"] = f"agent-room inbox --after {row['seq'] - 1} --limit 1"
             return {"items": rows[:limit], "next_after": rows[limit-1]["seq"] if len(rows) > limit else None}
 
-    def acknowledge(self, actor, message_id, evidence):
+    def _acknowledge(self, db, actor, message_id, evidence, *, expected_task=None, allow_identical=False):
         if not evidence.strip():
             raise RoomError("Describe what was processed, not merely transport acceptance")
+        row = db.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+        if not row or row["recipient"] != actor:
+            raise RoomError("Only the recipient may acknowledge this message", "authority")
+        if expected_task is not None:
+            if row["task"] != expected_task:
+                raise RoomError("Combined ACK must be for the same task", "conflict")
+            if row["status"] == "processed":
+                if allow_identical and row["detail"] == evidence:
+                    return
+                raise RoomError("Combined ACK message was already processed", "conflict")
+            actionable = db.execute(
+                f"SELECT 1 FROM messages WHERE id=? AND recipient=? AND {ACTIONABLE_PENDING_SQL}",
+                (message_id, actor)).fetchone()
+            if not actionable:
+                raise RoomError("Combined ACK requires an unprocessed actionable message", "conflict")
+        db.execute("UPDATE messages SET status='processed', detail=? WHERE id=?", (evidence, message_id))
+        for attempt_row in db.execute("SELECT id,data FROM attempts WHERE message=?", (message_id,)).fetchall():
+            attempt = json.loads(attempt_row["data"])
+            attempt.update(processed=now(), processing_evidence=evidence)
+            self.save_attempt(db, attempt)
+
+    def acknowledge(self, actor, message_id, evidence):
         with self.tx() as db:
-            row = db.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
-            if not row or row["recipient"] != actor:
-                raise RoomError("Only the recipient may acknowledge this message", "authority")
-            db.execute("UPDATE messages SET status='processed', detail=? WHERE id=?", (evidence, message_id))
-            for row in db.execute("SELECT id,data FROM attempts WHERE message=?", (message_id,)).fetchall():
-                attempt = json.loads(row["data"])
-                attempt.update(processed=now(), processing_evidence=evidence)
-                self.save_attempt(db, attempt)
+            self._acknowledge(db, actor, message_id, evidence)
 
     @staticmethod
     def save_attempt(db, attempt):
@@ -1001,6 +1162,54 @@ class Store:
                                 "dispatch_attempts": sum(attempt_states.values()), "attempts_by_result": attempt_states,
                                 "processed_acks": message_states.get("processed", 0), "broadcasts_enqueued": fanouts}
             return report
+
+    def incomplete_notification_deliveries(self, db):
+        """Correlate unavailable FYI recipients with the member message or admin receipt that notified them."""
+        reports = []
+        member_rows = db.execute(
+            "SELECT e.data AS event, m.recipient, m.status "
+            "FROM events e "
+            "LEFT JOIN messages origin ON origin.id=json_extract(e.data,'$.message') "
+            "LEFT JOIN messages m ON m.id=origin.id OR "
+            "json_extract(m.context,'$.broadcast.id')=json_extract(e.data,'$.message') "
+            "WHERE e.kind='message.broadcast' ORDER BY e.seq,m.seq")
+        current = None
+        statuses = {}
+        for row in member_rows:
+            data = json.loads(row["event"])
+            message_id = data["message"]
+            if current is not None and current["message"] != message_id:
+                reports.extend(self._incomplete_member_fanout(current, statuses))
+                statuses = {}
+            current = data
+            if row["recipient"] is not None:
+                statuses[row["recipient"]] = row["status"]
+        if current is not None:
+            reports.extend(self._incomplete_member_fanout(current, statuses))
+
+        admin_groups = {}
+        relay_rows = db.execute(
+            "SELECT id,recipient,status,context FROM messages "
+            "WHERE json_extract(context,'$.admin_relay')=1 ORDER BY seq")
+        for row in relay_rows:
+            context = json.loads(row["context"])
+            notice = context.get("admin_notice")
+            if notice:
+                key = ("admin", notice["receipt"])
+                group = admin_groups.setdefault(key, {"receipt": notice["receipt"], "incomplete_members": {}})
+                if row["status"] not in DELIVERED_STATUSES:
+                    group["incomplete_members"][row["recipient"]] = row["status"]
+            elif row["status"] not in DELIVERED_STATUSES:
+                reports.append({"message": row["id"],
+                                "incomplete_members": {row["recipient"]: row["status"]}})
+        reports.extend(group for group in admin_groups.values() if group["incomplete_members"])
+        return reports
+
+    @staticmethod
+    def _incomplete_member_fanout(event, statuses):
+        incomplete = {member: statuses.get(member, "missing") for member in event["members"]
+                      if statuses.get(member) not in DELIVERED_STATUSES}
+        return ([{"message": event["message"], "incomplete_members": incomplete}] if incomplete else [])
 
     def observe_peer_prompt(self, actor, session, message_id, sender):
         """Record prompt-text evidence for a bound session; source text does not prove peer origin."""
@@ -1171,13 +1380,17 @@ class Store:
                     task["latest_attempt"] = attempt
                     if attempt.get("progress_at"):
                         task["last_progress"] = max(task["last_progress"], attempt["progress_at"])
-            for row in db.execute("SELECT task,recipient,status,count(*) AS count FROM messages GROUP BY task,recipient,status"):
+            for row in db.execute(
+                    f"SELECT task,recipient,status,count(*) AS count, "
+                    f"sum(CASE WHEN {ACTIONABLE_PENDING_SQL} THEN 1 ELSE 0 END) AS pending_count "
+                    "FROM messages GROUP BY task,recipient,status"):
                 message_counts[row["status"]] += row["count"]
                 task = visible.get(row["task"])
-                if task is not None and row["status"] != "processed":
-                    task["unprocessed_messages"] += row["count"]
-                if row["status"] != "processed":
-                    pending_inboxes[row["recipient"]][row["status"]] += row["count"]
+                if row["pending_count"]:
+                    if task is not None:
+                        task["unprocessed_messages"] += row["pending_count"]
+                    pending_inboxes[row["recipient"]][row["status"]] += row["pending_count"]
+            incomplete_notifications = self.incomplete_notification_deliveries(db)
             result = {"room": room,
                     "members": [json.loads(r[0]) for r in db.execute("SELECT data FROM members")],
                     "tasks": tasks,
@@ -1190,6 +1403,11 @@ class Store:
                         },
                         "read_command": "agent-room inbox --pending --after 0",
                     },
+                    "incomplete_notifications": incomplete_notifications,
+                    "incomplete_notification_count": len(incomplete_notifications),
+                    "incomplete_notifications_by_member": dict(Counter(
+                        member for notice in incomplete_notifications for member in notice["incomplete_members"])),
+                    "incomplete_notifications_truncated": False,
                     "notes": [dict(json.loads(r["data"]), id=r["id"], version=r["version"])
                               for r in db.execute("SELECT id,version,data FROM notes ORDER BY rowid")],
                     "unaccounted_prompts": [dict(r) for r in db.execute("SELECT * FROM prompts WHERE accounted IS NULL")],
@@ -1218,10 +1436,13 @@ class Store:
                 item["latest_attempt"]["read_command"] = f"agent-room attempt show {attempt['id']}"
             status["tasks"].append(item)
         status["notes"] = [Store._note_preview(note) for note in notes if note["state"] in {"open", "approved"}]
-        status["detail"] = {"mode": "compact", "tasks": "All unfinished task identities; closed tasks counted above",
-                            "notes": "Open questions/proposals and approved decisions; other states counted above",
-                            "read_all_tasks": "agent-room task list --all", "read_all_notes": "agent-room note list",
-                            "rule": "Previews are not full task or decision context. Follow read_command before acting; full status remains available."}
+        # Keep one concrete example; counts cover the complete set and full status has every ID/state.
+        status["incomplete_notifications_truncated"] = len(status["incomplete_notifications"]) > 1
+        status["incomplete_notifications"] = status["incomplete_notifications"][:1]
+        status["detail"] = {"mode": "compact", "read_all_tasks": "agent-room task list --all",
+                            "read_all_notes": "agent-room note list",
+                            "read_incomplete_notifications": "agent-room status",
+                            "rule": "Previews need full records before acting."}
         # Keep unaccounted admin prompts, native approvals, claims and attention intact.
         return status
 
