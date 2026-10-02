@@ -4,8 +4,9 @@ A native Claude Code + Codex team for this project. Describe the outcome in ordi
 CLAUDE_01 operates room coordination and reports useful progress, results and necessary decisions.
 Members can ask, brainstorm, challenge, help and share experience directly within existing authority.
 
-**Version 0.3.22, schema 3.** This release sends queued messages to different members concurrently (each
-member's inbox stays in order). 0.3.21 added the admin's eight-section reply shape and installs
+**Version 0.3.23, schema 3.** Each member now has its own 20-message dispatch allowance, so one busy inbox cannot
+delay another member's messages, and admin replies use the three-zone shape. 0.3.22 sent queued messages to different
+members concurrently (each member's inbox stays in order). 0.3.21 added the admin's eight-section reply shape and installs
 i-have-asd-ste100 with Agent Room in Claude Code. Since 0.3.20 it also flags failed/unknown inbox deliveries,
 names the room reply channel, preserves resume guidance and skips duplicate fresh-start guidance.
 Reserved peer envelopes are a defensive classification guard, not proof of human authorship.
@@ -74,4 +75,4 @@ python3 bin/agent-room --json verify-package /path/to/agent-room.zip
 ```
 
 The verifier checks archive structure and hashes, not publisher authenticity. Default CLI contracts,
-schema, native permissions and model loops are unchanged in 0.3.22.
+schema, native permissions and model loops are unchanged in 0.3.23.

@@ -1,9 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="740" viewBox="0 0 1200 740" role="img" aria-labelledby="t d">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="900" viewBox="0 0 1200 900" role="img" aria-labelledby="t d">
 <title id="t">Agent Room</title><desc id="d">You talk to one gateway agent. Four Claude Code and Codex members share one ledger of tasks, claims, messages and reviews, and report back in one readable shape.</desc>
 <style>.h{font:700 22px -apple-system,"Segoe UI",Helvetica,Arial,sans-serif}.b{font:600 17px -apple-system,"Segoe UI",Helvetica,Arial,sans-serif}.s{font:14px -apple-system,"Segoe UI",Helvetica,Arial,sans-serif}.m{font:15px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}</style>
 <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0B1020"/><stop offset="1" stop-color="#1E1B4B"/></linearGradient>
 <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#818CF8"/></marker></defs>
-<rect width="1200" height="740" rx="20" fill="url(#bg)"/>
+<rect width="1200" height="900" rx="20" fill="url(#bg)"/>
 <text x="40" y="52" class="h" fill="#E0E7FF">One gateway. Four agents. One shared ledger.</text>
 <rect x="40" y="120" width="150" height="70" rx="14" fill="#1F2937" stroke="#64748B" stroke-width="2"/>
 <text x="115" y="150" text-anchor="middle" class="b" fill="#F8FAFC">You</text>
@@ -32,26 +32,31 @@
 <line x1="125" y1="430" x2="300" y2="390" stroke="#818CF8" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
 <line x1="355" y1="430" x2="355" y2="390" stroke="#818CF8" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
 <line x1="585" y1="430" x2="410" y2="390" stroke="#818CF8" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
-<rect x="720" y="110" width="440" height="580" rx="14" fill="#111827" stroke="#374151" stroke-width="2"/>
+<rect x="720" y="110" width="440" height="740" rx="14" fill="#111827" stroke="#374151" stroke-width="2"/>
 <circle cx="742" cy="132" r="6" fill="#F87171"/><circle cx="762" cy="132" r="6" fill="#FBBF24"/><circle cx="782" cy="132" r="6" fill="#34D399"/>
 <text x="940" y="137" text-anchor="middle" class="s" fill="#6B7280">report from the room</text>
-<text x="742" y="176" class="m" xml:space="preserve"><tspan fill="#6B7280">- </tspan><tspan fill="#E5E7EB" font-weight="700">Review:</tspan><tspan fill="#E5E7EB"> CODEX_EXPERT approved the fix.</tspan></text>
-<text x="742" y="201" class="m" xml:space="preserve"><tspan fill="#6B7280">- </tspan><tspan fill="#E5E7EB" font-weight="700">Tests:</tspan><tspan fill="#E5E7EB"> 213 of 214 pass.</tspan></text>
-<text x="742" y="236" class="m" xml:space="preserve"><tspan fill="#A5B4FC" font-weight="700">Conclusion:</tspan><tspan fill="#E5E7EB"> fix approved; 1 test fails.</tspan></text>
-<text x="742" y="271" class="m" xml:space="preserve"><tspan fill="#6B7280">0. </tspan><tspan fill="#A5B4FC" font-weight="700">Done:</tspan></text>
-<text x="742" y="296" class="m" xml:space="preserve"><tspan fill="#6B7280">   - </tspan><tspan fill="#E5E7EB" font-weight="700">Login fix:</tspan><tspan fill="#E5E7EB"> reviewed.</tspan></text>
-<text x="742" y="321" class="m" xml:space="preserve"><tspan fill="#6B7280">1. </tspan><tspan fill="#A5B4FC" font-weight="700">InProgress:</tspan></text>
-<text x="742" y="346" class="m" xml:space="preserve"><tspan fill="#6B7280">   - </tspan><tspan fill="#E5E7EB" font-weight="700">CI:</tspan><tspan fill="#E5E7EB"> rerun.</tspan></text>
-<text x="742" y="371" class="m" xml:space="preserve"><tspan fill="#6B7280">2. </tspan><tspan fill="#A5B4FC" font-weight="700">Pending:</tspan></text>
-<text x="742" y="396" class="m" xml:space="preserve"><tspan fill="#6B7280">3. </tspan><tspan fill="#A5B4FC" font-weight="700">Questions:</tspan></text>
-<text x="742" y="421" class="m" xml:space="preserve"><tspan fill="#6B7280">   - </tspan><tspan fill="#E5E7EB" font-weight="700">Q1.</tspan><tspan fill="#86EFAC"> Approve: deploy?</tspan></text>
-<text x="742" y="446" class="m" xml:space="preserve"><tspan fill="#6B7280">     - </tspan><tspan fill="#7DD3FC">&lt;a&gt;</tspan><tspan fill="#E5E7EB"> after CI.</tspan></text>
-<text x="742" y="471" class="m" xml:space="preserve"><tspan fill="#6B7280">4. </tspan><tspan fill="#A5B4FC" font-weight="700">Todos:</tspan></text>
-<text x="742" y="496" class="m" xml:space="preserve"><tspan fill="#6B7280">   - </tspan><tspan fill="#E5E7EB" font-weight="700">Payment test:</tspan><tspan fill="#E5E7EB"> check it.</tspan></text>
-<text x="742" y="521" class="m" xml:space="preserve"><tspan fill="#6B7280">5. </tspan><tspan fill="#A5B4FC" font-weight="700">Backlog:</tspan></text>
-<text x="742" y="546" class="m" xml:space="preserve"><tspan fill="#6B7280">6. </tspan><tspan fill="#A5B4FC" font-weight="700">Risks:</tspan></text>
-<text x="742" y="571" class="m" xml:space="preserve"><tspan fill="#6B7280">   - </tspan><tspan fill="#E5E7EB" font-weight="700">R1.</tspan><tspan fill="#E5E7EB"> old token library.</tspan></text>
-<text x="742" y="596" class="m" xml:space="preserve"><tspan fill="#6B7280">     - </tspan><tspan fill="#7DD3FC">&lt;a&gt;</tspan><tspan fill="#E5E7EB"> update | (b) skip</tspan></text>
-<text x="742" y="621" class="m" xml:space="preserve"><tspan fill="#6B7280">7. </tspan><tspan fill="#A5B4FC" font-weight="700">AIIdeas:</tspan></text>
-<text x="940" y="720" text-anchor="middle" class="s" fill="#6B7280">Reports use the i-have-asd-ste100 shape (installed with Agent Room).</text>
+<text x="742" y="176" class="m" xml:space="preserve"><tspan fill="#A5B4FC" font-weight="700">Agents-Zone</tspan></text>
+<text x="742" y="201" class="m" xml:space="preserve"><tspan fill="#6B7280">- </tspan><tspan fill="#7DD3FC">4:10 PM</tspan><tspan fill="#E5E7EB"> review =&gt; CODEX_EXPERT</tspan></text>
+<text x="742" y="226" class="m" xml:space="preserve"><tspan fill="#6B7280">- </tspan><tspan fill="#7DD3FC">4:16 PM</tspan><tspan fill="#E5E7EB"> approved =&gt; ran tests</tspan></text>
+<text x="742" y="261" class="m" xml:space="preserve"><tspan fill="#A5B4FC" font-weight="700">Result-Zone</tspan></text>
+<text x="742" y="286" class="m" xml:space="preserve"><tspan fill="#6B7280">- </tspan><tspan fill="#E5E7EB" font-weight="700">Review:</tspan><tspan fill="#E5E7EB"> CODEX_EXPERT approved the fix.</tspan></text>
+<text x="742" y="311" class="m" xml:space="preserve"><tspan fill="#6B7280">- </tspan><tspan fill="#E5E7EB" font-weight="700">Tests:</tspan><tspan fill="#E5E7EB"> 213 of 214 pass.</tspan></text>
+<text x="742" y="346" class="m" xml:space="preserve"><tspan fill="#A5B4FC" font-weight="700">Admin-Zone</tspan></text>
+<text x="742" y="381" class="m" xml:space="preserve"><tspan fill="#A5B4FC" font-weight="700">Conclusion:</tspan><tspan fill="#E5E7EB"> fix approved; 1 test fails.</tspan></text>
+<text x="742" y="416" class="m" xml:space="preserve"><tspan fill="#6B7280">0. </tspan><tspan fill="#A5B4FC" font-weight="700">Done:</tspan></text>
+<text x="742" y="441" class="m" xml:space="preserve"><tspan fill="#6B7280">   - </tspan><tspan fill="#E5E7EB" font-weight="700">Login fix:</tspan><tspan fill="#E5E7EB"> reviewed.</tspan></text>
+<text x="742" y="466" class="m" xml:space="preserve"><tspan fill="#6B7280">1. </tspan><tspan fill="#A5B4FC" font-weight="700">InProgress:</tspan></text>
+<text x="742" y="491" class="m" xml:space="preserve"><tspan fill="#6B7280">   - </tspan><tspan fill="#E5E7EB" font-weight="700">CI:</tspan><tspan fill="#E5E7EB"> rerun.</tspan></text>
+<text x="742" y="516" class="m" xml:space="preserve"><tspan fill="#6B7280">2. </tspan><tspan fill="#A5B4FC" font-weight="700">Pending:</tspan></text>
+<text x="742" y="541" class="m" xml:space="preserve"><tspan fill="#6B7280">3. </tspan><tspan fill="#A5B4FC" font-weight="700">Questions:</tspan></text>
+<text x="742" y="566" class="m" xml:space="preserve"><tspan fill="#6B7280">   - </tspan><tspan fill="#E5E7EB" font-weight="700">Q1.</tspan><tspan fill="#86EFAC"> Approve: deploy?</tspan></text>
+<text x="742" y="591" class="m" xml:space="preserve"><tspan fill="#6B7280">     - </tspan><tspan fill="#7DD3FC">&lt;a&gt;</tspan><tspan fill="#E5E7EB"> after CI.</tspan></text>
+<text x="742" y="616" class="m" xml:space="preserve"><tspan fill="#6B7280">4. </tspan><tspan fill="#A5B4FC" font-weight="700">Todos:</tspan></text>
+<text x="742" y="641" class="m" xml:space="preserve"><tspan fill="#6B7280">   - </tspan><tspan fill="#E5E7EB" font-weight="700">Payment test:</tspan><tspan fill="#E5E7EB"> check it.</tspan></text>
+<text x="742" y="666" class="m" xml:space="preserve"><tspan fill="#6B7280">5. </tspan><tspan fill="#A5B4FC" font-weight="700">Backlog:</tspan></text>
+<text x="742" y="691" class="m" xml:space="preserve"><tspan fill="#6B7280">6. </tspan><tspan fill="#A5B4FC" font-weight="700">Risks:</tspan></text>
+<text x="742" y="716" class="m" xml:space="preserve"><tspan fill="#6B7280">   - </tspan><tspan fill="#E5E7EB" font-weight="700">R1.</tspan><tspan fill="#E5E7EB"> old token library.</tspan></text>
+<text x="742" y="741" class="m" xml:space="preserve"><tspan fill="#6B7280">     - </tspan><tspan fill="#7DD3FC">&lt;a&gt;</tspan><tspan fill="#E5E7EB"> update | (b) skip</tspan></text>
+<text x="742" y="766" class="m" xml:space="preserve"><tspan fill="#6B7280">7. </tspan><tspan fill="#A5B4FC" font-weight="700">AIIdeas:</tspan></text>
+<text x="940" y="880" text-anchor="middle" class="s" fill="#6B7280">Reports use the i-have-asd-ste100 shape (installed with Agent Room).</text>
 </svg>

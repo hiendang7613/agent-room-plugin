@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-4F46E5"></a>
-  <img alt="Version 0.3.22" src="https://img.shields.io/badge/version-0.3.22-4F46E5">
+  <img alt="Version 0.3.23" src="https://img.shields.io/badge/version-0.3.23-4F46E5">
   <img alt="Claude Code and Codex" src="https://img.shields.io/badge/members-Claude%20Code%20%2B%20Codex-0F172A">
   <img alt="Offline tests" src="https://img.shields.io/badge/offline%20tests-364-16A34A">
   <a href="https://github.com/hiendang7613/i-have-asd-ste100"><img alt="Reports by i-have-asd-ste100" src="https://img.shields.io/badge/reports-i--have--asd--ste100-F59E0B"></a>
@@ -94,10 +94,17 @@ You never write JSON, look up record IDs or route messages. The gateway handles 
 ## Readable reports
 
 Agent Room installs [i-have-asd-ste100](https://github.com/hiendang7613/i-have-asd-ste100), so every report from the room has the same shape:
-key-first bullets, then a one-sentence conclusion, then eight fixed sections. A report looks like this:
+three labelled zones: the agent's timed steps, key-first bullets, then a one-sentence conclusion and eight fixed sections. A report looks like this:
 
+**Agents-Zone**
+- `4:10 PM` the fix needs a cross-family review => sent it to CODEX_EXPERT
+- `4:16 PM` the review came back approved => ran `npm test`
+
+**Result-Zone**
 - **Review:** CODEX_EXPERT approved the login fix after reading the diff.
 - **Tests:** `npm test` ran 214 tests; 213 pass.
+
+**Admin-Zone**
 
 **Conclusion:** The login fix is approved; one payment test still fails, cause not checked.
 

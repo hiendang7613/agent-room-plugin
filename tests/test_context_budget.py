@@ -17,8 +17,9 @@ from agent_room.store import MAX_MESSAGE_CHARS, MAX_MESSAGE_ID_BYTES, MAX_REVIEW
 from test_evidence import EvidenceFixture
 
 BUDGETS = {
-    "guidance": 1100,
-    "worker_role_instructions": 1150,
+    # 2026-10-03: +70 bytes buy the admin's three reply zones in the guidance line (also in worker instructions).
+    "guidance": 1170,
+    "worker_role_instructions": 1210,
     "delivery_taskless_overhead": 450,
     "delivery_taskless_recovery_overhead": 650,
     "delivery_task_overhead_excluding_pack": 550,
@@ -30,7 +31,8 @@ BUDGETS = {
     "review_fyi_total": 1300,
     "status_compact_one_task": 2700,
     # 2026-10-02: +20 bytes buy the admin's eight-section reply shape (6. Risks, 7. AIIdeas) in the guidance line.
-    "main_sessionstart_context": 1120,
+    # 2026-10-03: +90 bytes buy the admin's three reply zones (Agents-Zone, Result-Zone, Admin-Zone).
+    "main_sessionstart_context": 1210,
     "admin_prompt_context": 300,
     # DEC-020 (2026-10-01): cap wrapper bytes using the longest generated notice ID and max receipt ID.
     "admin_notice_delivery_overhead": 550,

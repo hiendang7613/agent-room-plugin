@@ -1,6 +1,6 @@
 # Admin-facing replies
 
-This guide shapes messages to the project admin. The admin chose this shape on 2026-10-02; the
+This guide shapes messages to the project admin. The admin chose this shape on 2026-10-02 and 2026-10-03; the
 i-have-asd-ste100 plugin (installed with Agent Room) carries the full rules. Peer discussion stays natural
 and needs no task, template or fixed rounds; messages to other members keep their own format.
 
@@ -8,9 +8,14 @@ and needs no task, template or fixed rounds; messages to other members keep thei
 
 A one-fact answer is one or two sentences. Otherwise:
 
-1. A short body of key-first bullets: each line starts with a bold word or a `path`.
-2. A bold `**Conclusion:**` line with the result in one sentence. Bad news first: failure, skip, blocker,
-   unverified work.
+1. Three zones, each under a bold label line with a blank line before it:
+   - `**Agents-Zone**`: every step this turn, one line per tool call or parallel batch:
+     `` - `4:43 PM` why => what ``. The time comes only from a real clock (Claude Code's hook supplies it);
+     without one, leave it out. No steps means the label only.
+   - `**Result-Zone**`: a short body of key-first bullets; each line starts with a bold word or a `path`.
+   - `**Admin-Zone**`: the closing part below.
+2. One blank line after `**Admin-Zone**`, a bold `**Conclusion:**` line with the result in one sentence.
+   Bad news first: failure, skip, blocker, unverified work.
 3. One blank line, then all eight sections as one numbered list from 0, with no blank lines between items.
    An empty section shows only its label.
 
