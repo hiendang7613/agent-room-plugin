@@ -42,7 +42,7 @@ class GuideTests(unittest.TestCase):
             result = run(parser().parse_args(["--project", str(self.root / "missing-project"), "guide"]))
         self.assertEqual(result["plugin_version"], __version__)
         self.assertEqual({item["topic"] for item in result["topics"]},
-                         {"collaboration", "learning", "evidence", "cli"})
+                         {"collaboration", "learning", "evidence", "cli", "response-style"})
         self.assertNotIn("content", result)
         self.assertLess(len(json.dumps(result)), 1000)
         self.assertFalse((self.root / "missing-project").exists())

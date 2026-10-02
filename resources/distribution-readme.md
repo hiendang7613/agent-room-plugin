@@ -54,7 +54,7 @@ handoff of affected open tasks. No silent replacement session or team expansion 
 
 ## Agent/operator references
 
-`agent-room guide` lists collaboration, learning, evidence and CLI references. Read a relevant topic
+`agent-room guide` lists collaboration, learning, evidence, CLI and response-style references. Read a relevant topic
 on demand, such as `agent-room guide collaboration`. Local custom rules remain in force after an
 upgrade; the reference identifies this CLI's version and source hash. See [contracts](docs/v1.1.md)
 for upgrade, permissions, errors and recovery. Source/runtime context already loaded into a native

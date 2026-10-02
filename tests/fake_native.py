@@ -236,7 +236,9 @@ def main():
         if flag == "--resume" and ((ROOT / "copy_claude").exists() or any(x in args for x in ("--settings", "--name", "--plugin-dir"))):
             session = str(uuid.uuid4())
         (ROOT / (session + ".options.json")).write_text(json.dumps(options))
-        record("claude_start", {"id": session, "resume": flag == "--resume"})
+        record("claude_start", {"id": session, "resume": flag == "--resume",
+                                 "model": args[args.index("--model") + 1] if "--model" in args else None,
+                                 "effort": args[args.index("--effort") + 1] if "--effort" in args else None})
         child_env = {key: value for key, value in os.environ.items() if not key.startswith("AGENT_ROOM_")}
         if options.get("settings"):
             child_env.update(json.loads(Path(options["settings"]).read_text()).get("env", {}))

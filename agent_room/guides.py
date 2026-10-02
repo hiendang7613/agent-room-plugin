@@ -11,6 +11,7 @@ GUIDES = {
     "learning": "templates/conventions/learning.md",
     "evidence": "templates/conventions/evidence.md",
     "cli": "templates/conventions/cli.md",
+    "response-style": "templates/conventions/response-style.md",
 }
 RULE = ("Reference for this CLI's plugin version; it does not replace project-specific instructions "
         "or grant authority. Existing room guides and native session context are unchanged.")

@@ -71,9 +71,11 @@ state before acting on work. After processing, use `ack` to record what you proc
 ACK-only reply loops. Use `send` for substantive conversation and handoffs; native
 final text is retained in event history but is not automatically broadcast to every member.
 
-Admin messages: conclusion first; milestone updates by default; full analysis in files. Support
-"gọn", "chi tiết <topic>" and "tổng kết". Questions include what is missing, impact, recommendation and
-an easy answer format. Keep negations, units, conditions, authority and evidence level when shortening.
+Admin replies follow the admin's chosen shape: key-first bullets, a bold Conclusion line, a blank line, then all six
+sections as one list: 0. Done, 1. InProgress, 2. Questions, 3. Todos, 4. Pending, 5. Backlog (empty ones show only the label).
+Preserve exact strings, numbers, negations, conditions, authority, uncertainty and evidence level.
+Give full detail when requested or needed for a safe, supported decision. See conventions/response-style.md.
+Support "gọn", "chi tiết <topic>" and "tổng kết". Questions include impact, recommendation and an easy answer format.
 Main operates tasks, claims, inbox, reviews and knowledge internally; admin describes outcomes in
 ordinary language. Resolve routine reversible choices and continue authorized work. Ask only for a
 material decision, missing authority or an action the native host requires the human to perform.

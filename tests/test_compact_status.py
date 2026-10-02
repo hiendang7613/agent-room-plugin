@@ -194,8 +194,14 @@ class CompactStatusTests(EvidenceFixture, unittest.TestCase):
         with self.store.tx() as db:
             db.execute("INSERT INTO approvals VALUES (?,?)", ("A-fixture", dumps({"id": "A-fixture", "state": "pending", "params": {"command": "sensitive action " * 100}})))
         full, compact = self.store.status(), self.store.status(compact=True)
-        for key in ("unaccounted_prompts", "approvals", "claims", "attention", "pending_inboxes", "room", "members"):
+        for key in ("unaccounted_prompts", "approvals", "claims", "attention", "pending_inboxes", "room"):
             self.assertEqual(compact[key], full[key], key)
+        model_fields = {"requested_model", "requested_effort", "model_label", "settings_application",
+                        "observed_model", "observed_effort", "model_observation_source", "model_observed_at"}
+        compact_members = [{key: value for key, value in member.items() if key not in model_fields}
+                           for member in full["members"]]
+        self.assertEqual(compact["members"], compact_members)
+        self.assertEqual(compact["detail"]["read_models"], "agent-room status")
 
     def test_note_preview_and_stale_review_keep_current_identity_and_full_read_path(self):
         task = self.task()

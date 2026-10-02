@@ -12,6 +12,7 @@ from agent_room.common import (GATEWAY, MEMBERS, MODES, RoomError, acting_member
                                file_lock, fingerprint, native_event_prompt, now, overlaps, scoped_path, uid)
 from agent_room.evidence import bounded, capture, digest, matches_terms, nonempty_strings, source_matches
 from agent_room.provenance import assess_chain
+from agent_room.roster import ROSTER_BY_NAME
 from agent_room.schema import EXTENSIONS, KNOWLEDGE_SCHEMA, VERSION
 
 
@@ -132,9 +133,14 @@ class Store:
                         "created": now(), "error": None}
                 db.execute("INSERT INTO meta VALUES ('room', ?)", (dumps(room),))
                 for name in MEMBERS:
+                    profile = ROSTER_BY_NAME[name]
                     db.execute("INSERT INTO members VALUES (?,?)", (name, dumps({
                         "name": name, "native_id": None, "pid": None, "stamp": None,
                         "status": "stopped", "error": None, "turn_id": None,
+                        "requested_model": profile["model"], "requested_effort": profile["effort"],
+                        "model_label": profile["label"],
+                        "settings_application": "host-managed" if profile["control"] == "host" else "configured; not started",
+                        "observed_model": None, "observed_effort": None, "model_observed_at": None,
                     })))
                 db.commit()
                 db.close()
@@ -1391,8 +1397,23 @@ class Store:
                         task["unprocessed_messages"] += row["pending_count"]
                     pending_inboxes[row["recipient"]][row["status"]] += row["pending_count"]
             incomplete_notifications = self.incomplete_notification_deliveries(db)
+            members = []
+            for row in db.execute("SELECT data FROM members"):
+                member = json.loads(row[0])
+                profile = ROSTER_BY_NAME[member["name"]]
+                member.setdefault("requested_model", profile["model"])
+                member.setdefault("requested_effort", profile["effort"])
+                member.setdefault("model_label", profile["label"])
+                member.setdefault("observed_model", None)
+                member.setdefault("observed_effort", None)
+                member.setdefault("model_observed_at", None)
+                member.setdefault("settings_application", (
+                    "host-managed" if profile["control"] == "host" else
+                    "existing session; settings application unknown" if member.get("native_id") else
+                    "configured; not started"))
+                members.append(member)
             result = {"room": room,
-                    "members": [json.loads(r[0]) for r in db.execute("SELECT data FROM members")],
+                    "members": members,
                     "tasks": tasks,
                     "attention": self._attention(db, tasks),
                     "pending_inboxes": {
@@ -1436,11 +1457,17 @@ class Store:
                 item["latest_attempt"]["read_command"] = f"agent-room attempt show {attempt['id']}"
             status["tasks"].append(item)
         status["notes"] = [Store._note_preview(note) for note in notes if note["state"] in {"open", "approved"}]
+        model_fields = ("requested_model", "requested_effort", "model_label", "settings_application",
+                        "observed_model", "observed_effort", "model_observation_source", "model_observed_at")
+        for member in status["members"]:
+            for field in model_fields:
+                member.pop(field, None)
         # Keep one concrete example; counts cover the complete set and full status has every ID/state.
         status["incomplete_notifications_truncated"] = len(status["incomplete_notifications"]) > 1
         status["incomplete_notifications"] = status["incomplete_notifications"][:1]
         status["detail"] = {"mode": "compact", "read_all_tasks": "agent-room task list --all",
                             "read_all_notes": "agent-room note list",
+                            "read_models": "agent-room status",
                             "read_incomplete_notifications": "agent-room status",
                             "rule": "Previews need full records before acting."}
         # Keep unaccounted admin prompts, native approvals, claims and attention intact.

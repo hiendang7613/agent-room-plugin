@@ -17,6 +17,7 @@ from agent_room.common import (GATEWAY, MEMBERS, MODES, acting_member, PLUGIN_RO
 from agent_room.native import (CodexClient, claude_agents, doctor, exact_claude,
                                owned_descendants, send_claude, start_claude, stop_claude_worker,
                                stop_descendants, wait_for_exit)
+from agent_room.roster import ROSTER_BY_NAME, launch_config
 from agent_room.store import FYI_CONTEXT_SQL, Store
 
 
@@ -210,19 +211,28 @@ class Supervisor:
             member = self.store.member(name)
             env = self.worker_env(name)
             self.store.member(name, {"status": "starting", "error": None, "unexpected_native_id": None})
-            if name.startswith("CODEX"):
+            profile = ROSTER_BY_NAME[name]
+            if profile["host"] == "codex":
                 client = CodexClient(self.store.project, name, env, self.store.runtime / (name + ".log"))
                 self.codex[name] = client  # Own cleanup even when initialization fails.
                 await client.start(member["native_id"])
+                settings_application = ("model requested at thread start; model and effort requested on new turns"
+                                        if not member["native_id"] else
+                                        "model requested at thread resume; active turn unchanged; effort requested on each new turn")
                 self.store.member(name, {"native_id": client.thread_id, "pid": client.process.pid,
                     "stamp": client.stamp, "status": "idle", "turn_id": client.turn_id,
-                    "permission_class": client.permission_class})
+                    "permission_class": client.permission_class,
+                    "requested_model": profile["model"],
+                    "requested_effort": profile["effort"],
+                    "settings_application": settings_application})
             else:
                 native_id = member["native_id"]
                 self.claude[name] = native_id
+                config = launch_config(name)
                 try:
                     native = await start_claude(self.store.project, native_id, bool(member["native_id"]),
-                                               env, self.store.runtime / (name + ".log"))
+                                               env, self.store.runtime / (name + ".log"),
+                                               model=config["model"], effort=config["effort"])
                 except RoomError as exc:
                     reported = exc.details.get("reported_new_ids", [])
                     registered = self.store.member(name)
@@ -236,7 +246,11 @@ class Supervisor:
                     raise
                 self.claude[name] = native["sessionId"]
                 self.store.member(name, {"native_id": native["sessionId"], "job_id": native.get("id"),
-                                         "pid": native["pid"], "stamp": process_stamp(native["pid"]), "status": "idle"})
+                                         "pid": native["pid"], "stamp": process_stamp(native["pid"]), "status": "idle",
+                                         "requested_model": profile["model"], "requested_effort": profile["effort"],
+                                         "settings_application": ("model and effort passed to new Claude session"
+                                             if not member["native_id"] else
+                                             "resumed existing Claude session without model or effort override")})
         self.store.wake_resumed_work(self.generation)
         with self.store.tx() as db:
             room = self.store.get_room(db)

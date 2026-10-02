@@ -206,6 +206,17 @@ class RuntimeTests(unittest.TestCase):
     def test_default_native_bridge_and_exact_resume(self):
         self.start()
         first = self.store.member("CODEX_EXPERT")["native_id"]
+        thread_starts = [effect for effect in self.effects("codex_packet")
+                         if effect["data"].get("method") == "thread/start"]
+        models = {effect["member"]: effect["data"]["params"].get("model") for effect in thread_starts}
+        self.assertEqual(models, {"CODEX_01": "gpt-6-luna", "CODEX_EXPERT": "gpt-6.1-sol"})
+        settings = {member["name"]: member for member in self.store.status()["members"]}
+        self.assertEqual(settings["CODEX_01"]["requested_effort"], "xhigh")
+        self.assertIn("model requested at thread start", settings["CODEX_01"]["settings_application"])
+        self.assertEqual(settings["CLAUDE_01"]["settings_application"], "host-managed")
+        claude_launch = next(effect["data"] for effect in self.effects("claude_start")
+                             if effect["member"] == "CLAUDE_EXPERT")
+        self.assertEqual((claude_launch["model"], claude_launch["effort"]), ("opus", "xhigh"))
         body = "send peer result\nLiteral $(text), `code`, unicode: chào"
         sent = self.call("send", "--to", "CODEX_EXPERT", "--body", body)
         with self.store.read() as db:
@@ -219,6 +230,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(packet["from"], "CODEX_EXPERT")
         self.assertEqual(packet["session_id"], self.session)
         self.assertIn("NOT admin consent", packet["message"]["content"])
+        turn_start = next(effect["data"] for effect in self.effects("codex_packet")
+                          if effect["member"] == "CODEX_EXPERT" and effect["data"].get("method") == "turn/start")
+        self.assertEqual((turn_start["params"]["model"], turn_start["params"]["effort"]),
+                         ("gpt-6.1-sol", "xhigh"))
         message_id = packet["msg_id"]
         self.assertNotIn("processed", self.store.status()["message_counts"])
         self.call("ack", message_id, "--evidence", "Fixture recipient processed the finding")
@@ -230,6 +245,13 @@ class RuntimeTests(unittest.TestCase):
         packets = self.effects("codex_packet")
         resumes = [e["data"] for e in packets if e["data"].get("method") == "thread/resume"]
         self.assertEqual(resumes[-1]["params"]["threadId"], first)
+        self.assertEqual(resumes[-1]["params"]["model"], "gpt-6.1-sol")
+        self.assertIn("model requested at thread resume", self.store.member("CODEX_EXPERT")["settings_application"])
+        claude_resumes = [e["data"] for e in self.effects("claude_start")
+                          if e["member"] == "CLAUDE_EXPERT" and e["data"].get("resume")]
+        self.assertTrue(claude_resumes)
+        self.assertIsNone(claude_resumes[-1]["model"])
+        self.assertIsNone(claude_resumes[-1]["effort"])
         for packet in (e["data"] for e in packets if e["data"].get("method") in {"thread/start", "thread/resume"}):
             guidance = packet["params"]["developerInstructions"]
             self.assertIn("agents_space/rules/working_agreement.md", guidance)
@@ -756,9 +778,18 @@ raise SystemExit(exit_code)
         self.wait(lambda: self.store.member("CODEX_EXPERT").get("turn_id"))
         self.call("send", "--to", "CODEX_EXPERT", input="A new relevant finding")
         self.wait(lambda: any(e["data"].get("method") == "turn/steer" for e in self.effects("codex_packet")))
+        steer = next(e["data"] for e in self.effects("codex_packet")
+                     if e["data"].get("method") == "turn/steer")
+        self.assertNotIn("model", steer["params"])
+        self.assertNotIn("effort", steer["params"], "An in-progress native turn is not reconfigured by a steer")
         self.wait(lambda: self.store.member("CODEX_EXPERT")["status"] == "idle")
         self.call("send", "--to", "CODEX_EXPERT", input="Another independent finding")
-        self.wait(lambda: len([e for e in self.effects("codex_packet") if e["data"].get("method") == "turn/start"]) == 2)
+        self.wait(lambda: len([e for e in self.effects("codex_packet")
+                               if e["member"] == "CODEX_EXPERT" and e["data"].get("method") == "turn/start"]) == 2)
+        turn_start = [e["data"] for e in self.effects("codex_packet")
+                      if e["member"] == "CODEX_EXPERT" and e["data"].get("method") == "turn/start"][-1]
+        self.assertEqual((turn_start["params"]["model"], turn_start["params"]["effort"]),
+                         ("gpt-6.1-sol", "xhigh"))
 
     def test_native_approval_requires_explicit_bound_response(self):
         self.start()

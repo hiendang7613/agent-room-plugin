@@ -11,7 +11,8 @@ Preserve any additional reading required by this project's own instructions.
 
 Open guides when useful for the work at hand: [CLI operations](conventions/cli.md),
 [review/checkpoints](conventions/evidence.md), [collaboration](conventions/collaboration.md),
-or [shared learning](conventions/learning.md). Use subcommand `--help` for arguments.
+[shared learning](conventions/learning.md), or [admin-facing response style](conventions/response-style.md).
+Use subcommand `--help` for arguments.
 After a plugin upgrade, `agent-room guide` lists current shipped references by topic; for example,
 `agent-room guide collaboration`. Existing room guides stay preserved and may contain custom rules.
 The reference reports its CLI's plugin version; project-specific instructions still apply.

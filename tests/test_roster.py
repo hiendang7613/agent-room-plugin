@@ -1,21 +1,15 @@
-"""The four-member room and admin gateway are data (agent_room/roster.py).
+"""Roster aliases, requested model settings and the host-managed gateway contract."""
 
-The admin's names CLAUDE_WORKER and CODEX_WORKER work as aliases of the stable ids; the intended model and effort
-(all xhigh) are recorded but not applied at launch; exactly one member is the gateway; and no module other than the
-roster spells a member id as a code literal, so the hardcoding cannot grow back unnoticed.
-"""
-
-import inspect
+import json
 import os
 from pathlib import Path
 import re
 import unittest
 from unittest.mock import patch
 
-from agent_room import native
 from agent_room.cli import parser, run
 from agent_room.common import GATEWAY, MEMBERS, MODES, RoomError, acting_member, canonical_member
-from agent_room.roster import ALIASES, DEFAULT_MEMBERS, LAUNCHED_CLAUDE, ROSTER
+from agent_room.roster import ALIASES, DEFAULT_MEMBERS, LAUNCHED_CLAUDE, ROSTER, launch_config
 from test_evidence import EvidenceFixture
 
 
@@ -34,13 +28,36 @@ class RosterTests(EvidenceFixture, unittest.TestCase):
         self.assertEqual(ALIASES, {"CLAUDE_WORKER": "CLAUDE_01", "CODEX_WORKER": "CODEX_01"})
         self.assertFalse(set(ALIASES) & set(names))  # An alias never shadows an id.
 
-    def test_intended_defaults_are_recorded_but_not_applied_at_launch(self):
-        self.assertEqual({member["name"]: member["intended"] for member in ROSTER},
-                         {"CLAUDE_01": {"model": "Sonnet 5.5", "effort": "xhigh"}, "CODEX_01": {"model": "Luna 6", "effort": "xhigh"},
-                          "CLAUDE_EXPERT": {"model": "Opus 5.5", "effort": "xhigh"}, "CODEX_EXPERT": {"model": "Sol 6.1", "effort": "xhigh"}})
-        self.assertTrue(all(member["model"] is None and member["effort"] is None for member in ROSTER))  # Inherit until a launch step applies them.
-        self.assertNotIn("--model", inspect.getsource(native.start_claude))
-        self.assertNotIn("--effort", inspect.getsource(native.start_claude))
+    def test_model_effort_defaults_are_roster_data_and_gateway_remains_host_managed(self):
+        self.assertEqual({member["name"]: (member["label"], member["model"], member["effort"])
+                          for member in ROSTER},
+                         {"CLAUDE_01": ("Sonnet 5.5", "sonnet", "xhigh"),
+                          "CODEX_01": ("Luna 6", "gpt-6-luna", "xhigh"),
+                          "CLAUDE_EXPERT": ("Opus 5.5", "opus", "xhigh"),
+                          "CODEX_EXPERT": ("Sol 6.1", "gpt-6.1-sol", "xhigh")})
+        self.assertIsNone(launch_config("CLAUDE_01"))
+        self.assertEqual(launch_config("CODEX_WORKER"), {"model": "gpt-6-luna", "effort": "xhigh"})
+        self.assertEqual(launch_config("CLAUDE_EXPERT"), {"model": "opus", "effort": "xhigh"})
+        members = {member["name"]: member for member in self.store.status()["members"]}
+        self.assertEqual(members["CODEX_EXPERT"]["requested_model"], "gpt-6.1-sol")
+        self.assertEqual(members["CODEX_EXPERT"]["requested_effort"], "xhigh")
+        self.assertIsNone(members["CODEX_EXPERT"]["observed_model"])
+        self.assertEqual(members["CODEX_EXPERT"]["settings_application"], "configured; not started")
+
+    def test_legacy_member_rows_get_requested_defaults_without_claiming_application(self):
+        self.store.member("CODEX_01", {"native_id": "legacy-thread"})
+        with self.store.tx() as db:
+            row = db.execute("SELECT data FROM members WHERE name=?", ("CODEX_01",)).fetchone()
+            member = json.loads(row[0])
+            for key in ("requested_model", "requested_effort", "model_label", "settings_application",
+                        "observed_model", "observed_effort", "model_observed_at"):
+                member.pop(key, None)
+            db.execute("UPDATE members SET data=? WHERE name=?", (json.dumps(member), "CODEX_01"))
+        status = {member["name"]: member for member in self.store.status()["members"]}["CODEX_01"]
+        self.assertEqual(status["requested_model"], "gpt-6-luna")
+        self.assertEqual(status["requested_effort"], "xhigh")
+        self.assertIsNone(status["observed_model"])
+        self.assertEqual(status["settings_application"], "existing session; settings application unknown")
 
     def test_aliases_work_at_the_cli_and_in_the_environment(self):
         args = parser().parse_args(["--project", str(self.project), "send", "--to", "CODEX_WORKER", "--body", "hello"])

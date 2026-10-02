@@ -160,10 +160,14 @@ class NativeContextTests(EvidenceFixture, unittest.TestCase):
             self.store.put_room(db, room)
         self.store.member("CLAUDE_EXPERT", {"status": "starting",
             "token_hash": hashlib.sha256(token.encode()).hexdigest()})
-        payload = {"hook_event_name": "SessionStart", "cwd": str(self.project), "session_id": "expert", "source": "startup"}
+        payload = {"hook_event_name": "SessionStart", "cwd": str(self.project), "session_id": "expert",
+                   "source": "startup", "model": "claude-opus-5-5"}
         with patch.dict(os.environ, AGENT_ROOM_MEMBER="CLAUDE_EXPERT", AGENT_ROOM_BINDING=token, CLAUDE_ENV_FILE=""):
             self.assertEqual(handle(payload), {})
             self.assertEqual(self.store.member("CLAUDE_EXPERT")["native_id"], "expert")
+            self.assertEqual(self.store.member("CLAUDE_EXPERT")["observed_model"], "claude-opus-5-5")
+            self.assertIsNone(self.store.member("CLAUDE_EXPERT")["observed_effort"])
+            self.assertEqual(self.store.member("CLAUDE_EXPERT")["model_observation_source"], "Claude SessionStart")
             for source in ("resume", "compact", None):
                 result = handle(payload | {"source": source})
                 self.assertIn("member CLAUDE_EXPERT", result["hookSpecificOutput"]["additionalContext"])
@@ -179,6 +183,22 @@ class NativeContextTests(EvidenceFixture, unittest.TestCase):
                 failure = handle(payload | {"source": source})
                 self.assertIn("not bound", failure["hookSpecificOutput"]["additionalContext"])
                 self.assertNotIn("You are Agent Room member", failure["hookSpecificOutput"]["additionalContext"])
+
+    def test_gateway_model_is_observed_but_stays_host_managed(self):
+        payload = {"hook_event_name": "SessionStart", "cwd": str(self.project), "session_id": "main",
+                   "source": "startup", "model": "claude-sonnet-5-5"}
+        with patch.dict(os.environ, {"AGENT_ROOM_SKIP_ALIAS": "1", "CLAUDE_ENV_FILE": ""}, clear=True), \
+                patch("agent_room.hooks.bind_main") as bind, \
+                patch("agent_room.hooks.start_room", return_value={"reason": "fixture room already running"}):
+            result = handle(payload)
+        self.assertIn("fixture room already running", result["hookSpecificOutput"]["additionalContext"])
+        bind.assert_called_once()
+        member = self.store.member(GATEWAY)
+        self.assertEqual(member["requested_model"], "sonnet")
+        self.assertEqual(member["requested_effort"], "xhigh")
+        self.assertEqual(member["observed_model"], "claude-sonnet-5-5")
+        self.assertIsNone(member["observed_effort"])
+        self.assertIn("host-managed", member["settings_application"])
 
     def test_wrapped_native_peers_never_become_admin_authority(self):
         with self.store.tx() as db:

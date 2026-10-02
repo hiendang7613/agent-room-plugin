@@ -9,6 +9,16 @@ brainstorm, phản biện, nhắc việc, chia sẻ kinh nghiệm và chủ đ�
 Bản ZIP này cải thiện khôi phục tin gửi lỗi và hướng dẫn khi tiếp tục phiên. Source đang có thay đổi
 chưa đóng gói sau 0.3.20; ZIP 0.3.20 chưa có room bốn người mặc định hoặc notify-all.
 
+## Báo cáo dễ đọc với i-have-asd-ste100
+
+Agent Room cài kèm [i-have-asd-ste100](https://github.com/hiendang7613/i-have-asd-ste100): mọi báo cáo gửi bạn có cùng một hình dạng,
+bằng ngôn ngữ của bạn. Các dòng mở đầu bằng từ khóa, rồi một câu **Conclusion**, rồi đủ sáu mục:
+0. Done, 1. InProgress, 2. Questions, 3. Todos, 4. Pending, 5. Backlog. Phương án khuyến nghị ghi `<a>`.
+Tắt trong một phiên bằng "stop ste mode".
+
+*Readable reports: Agent Room installs i-have-asd-ste100, so every report from the room ends with the same short,
+predictable conclusion and six fixed sections, in your language.*
+
 ## Bắt đầu làm việc
 
 Trong Claude Code, mở project muốn làm việc rồi dùng:
@@ -26,8 +36,19 @@ broadcast là FYI; chỉ member được gọi đích danh sở hữu yêu cầu
 đang dừng hoặc bị pause. `agent-room wakes` phân biệt hàng đợi, lần thử gửi và ACK; các số đó chưa
 chứng minh agent đã đọc hoặc cho biết token/cost.
 
-Runtime hiện vẫn kế thừa model/effort từ cấu hình native của host; model defaults trong roster chưa
-được áp dụng khi khởi chạy. Bằng chứng model thật, token và cost cho hành vi workspace mới chưa có.
+Roster đặt Sonnet 5.5 / Luna 6 / Opus 5.5 / Sol 6.1, tất cả xhigh. Thành viên được khởi chạy nhận
+model/effort qua native launch, Codex thread start/resume và mỗi lượt Codex mới; một turn đang chạy
+và session Claude cũ được resume không bị đổi giữa chừng. CLAUDE_01 là session host bạn đang dùng nên room không ép model hay
+effort vào session đó. `agent-room status` tách requested settings khỏi model host báo lại; nếu host
+không báo model, trường observed để trống. Cài đặt này chưa được chạy với provider thật và không phải
+bằng chứng về model được chọn, token hay cost.
+
+Claude Code dùng alias `sonnet`/`opus`; [tài liệu Anthropic](https://docs.anthropic.com/en/docs/claude-code/model-config)
+nói alias trỏ tới model mới nhất theo provider và có thể đổi theo thời gian. Tại lần kiểm tra 2026-10-02,
+tài liệu ghi Anthropic API ánh xạ chúng tới Sonnet 5.5/Opus 5.5, nhưng room không kiểm tra provider
+hoặc cấu hình tài khoản. [Tài liệu Codex](https://developers.openai.com/codex/models) công bố ID
+`gpt-6-luna`/`gpt-6.1-sol`; quyền truy cập tùy plan, client và rollout. `xhigh` là effort được yêu cầu,
+còn model/host phải hỗ trợ mức đó. Các request không bảo đảm model đã chạy với phiên bản hay effort mong muốn.
 
 CLAUDE_01 là session bạn đang chat; bạn tiếp tục giao việc ở đó bằng ngôn ngữ tự nhiên. Ví dụ:
 

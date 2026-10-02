@@ -13,7 +13,7 @@ import subprocess
 
 from agent_room import __version__
 from agent_room.common import PLUGIN_ROOT, RoomError, atomic_write, dumps, process_alive, process_stamp
-from agent_room.roster import LAUNCHED_CLAUDE
+from agent_room.roster import LAUNCHED_CLAUDE, launch_config
 
 
 COLLABORATION_GUIDANCE = (PLUGIN_ROOT / "resources/collaboration-guidance.md").read_text().strip()
@@ -210,6 +210,9 @@ async def stop_claude_worker(project, native_id, member):
 class CodexClient:
     def __init__(self, project, member, env, log):
         self.project, self.member, self.env, self.log = project, member, env, log
+        self.model_config = launch_config(member)
+        if not self.model_config:
+            raise RoomError("Codex client needs a spawned roster member", "configuration")
         self.process = None
         self.reader = None
         self.pending = {}
@@ -236,6 +239,7 @@ class CodexClient:
         params = {"cwd": str(self.project), "developerInstructions": role_instructions(self.member)}
         if native_id:
             params["threadId"] = native_id
+        params["model"] = self.model_config["model"]
         result = await self.request("thread/resume" if native_id else "thread/start", params)
         self.thread_id = result["thread"]["id"]
         if native_id and self.thread_id != native_id:
@@ -306,6 +310,8 @@ class CodexClient:
             await self.request("turn/steer", params)
             self.last_sent_turn_id = params["expectedTurnId"]
         else:
+            params["model"] = self.model_config["model"]
+            params["effort"] = self.model_config["effort"]
             result = await self.request("turn/start", params)
             turn_id = result["turn"]["id"]
             self.last_sent_turn_id = turn_id
@@ -340,12 +346,13 @@ class CodexClient:
         await stop_descendants(descendants)
 
 
-async def start_claude(project, native_id, resume, env, log, member=LAUNCHED_CLAUDE, instructions=None, timeout=25):
+async def start_claude(project, native_id, resume, env, log, member=LAUNCHED_CLAUDE, instructions=None,
+                       timeout=25, model=None, effort=None):
     previous = {agent.get("sessionId") for agent in await asyncio.to_thread(claude_agents, project)}
     log_path = str(Path(log).resolve())
     # Background jobs may be hosted by an already-running daemon, which does not
     # forward arbitrary caller variables. Pass only room-local bindings through
-    # native per-launch settings; leave model, credentials and permissions alone.
+    # native per-launch settings; model/effort use the host's documented CLI flags.
     settings = Path(log).with_suffix(".settings.json")
     bindings = {key: value for key, value in env.items()
                 if key.startswith("AGENT_ROOM_") or key == "CLAUDE_CODE_DISABLE_BG_EXIT_HANDOFF"}
@@ -358,6 +365,12 @@ async def start_claude(project, native_id, resume, env, log, member=LAUNCHED_CLA
         args = ["claude", "--bg", "--name", member, "--plugin-dir", str(PLUGIN_ROOT),
                 "--settings", str(settings),
                 "--append-system-prompt", instructions or role_instructions(member)]
+        if model:
+            args.extend(["--model", model])
+        if effort:
+            if effort not in {"low", "medium", "high", "xhigh", "max"}:
+                raise RoomError("Unsupported Claude effort setting", "configuration")
+            args.extend(["--effort", effort])
     # --bg allocates its own ID. --session-id is explicitly ignored by native Claude.
     with open(log, "a+", encoding="utf-8") as stderr:
         start = stderr.tell()

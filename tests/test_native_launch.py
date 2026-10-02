@@ -19,6 +19,30 @@ class FailedProcess:
 
 
 class NativeLaunchTests(unittest.TestCase):
+    def test_claude_model_and_effort_are_set_only_on_fresh_worker_launches(self):
+        with tempfile.TemporaryDirectory(prefix="native model config ") as directory:
+            project = Path(directory)
+            captured = []
+
+            async def failed_launch(*args, **kwargs):
+                captured.append(args)
+                return FailedProcess()
+
+            for resume, native_id in ((False, None), (True, "existing-session")):
+                with self.subTest(resume=resume), \
+                        patch("agent_room.native.claude_agents", return_value=[]), \
+                        patch("agent_room.native.asyncio.create_subprocess_exec", new=failed_launch):
+                    with self.assertRaises(RoomError):
+                        asyncio.run(start_claude(project, native_id, resume, {"PATH": "/usr/bin"},
+                            project / "runtime" / "CLAUDE_EXPERT.log", member="CLAUDE_EXPERT",
+                            model="opus", effort="xhigh"))
+
+            fresh_args, resume_args = captured
+            self.assertEqual(fresh_args[fresh_args.index("--model") + 1], "opus")
+            self.assertEqual(fresh_args[fresh_args.index("--effort") + 1], "xhigh")
+            self.assertNotIn("--model", resume_args)
+            self.assertNotIn("--effort", resume_args)
+
     def test_smoke_cleanup_rejects_duplicate_registry_identity_for_known_session(self):
         with tempfile.TemporaryDirectory(prefix="native cleanup duplicate ") as directory:
             project = Path(directory)

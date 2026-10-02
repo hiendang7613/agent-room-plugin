@@ -6,9 +6,10 @@ from pathlib import Path
 import shlex
 
 from agent_room.common import (GATEWAY, MEMBERS, RoomError, acting_member, native_event_prompt,
-                               native_peer_event, native_prompt_delivery)
+                               native_peer_event, native_prompt_delivery, now)
 from agent_room.native import COLLABORATION_GUIDANCE, role_instructions
 from agent_room.provenance import assess, transcript_size
+from agent_room.roster import ROSTER_BY_NAME
 from agent_room.runtime import bind_main, request_stop, start_room
 from agent_room.scaffold import install_alias
 from agent_room.store import Store
@@ -55,6 +56,24 @@ def handle(payload):
                     bind_main(store, session, payload.get("permission_mode", "default"))
                     result = start_room(store, session, permission_mode=payload.get("permission_mode", "default"), automatic=True)
                     warnings.append(result.get("reason", "Room resume requested; verify status."))
+                profile = ROSTER_BY_NAME[member]
+                model = payload.get("model")
+                observed = model.strip() if isinstance(model, str) and model.strip() else None
+                settings = {
+                    "requested_model": profile["model"],
+                    "requested_effort": profile["effort"],
+                    "model_label": profile["label"],
+                    "observed_model": observed,
+                    "observed_effort": None,
+                    "model_observation_source": "Claude SessionStart" if observed else None,
+                    "model_observed_at": now() if observed else None,
+                }
+                if not worker:
+                    settings["settings_application"] = "host-managed; Agent Room cannot change the active gateway session"
+                else:
+                    registered = store.member(member)
+                    settings["settings_application"] = registered.get("settings_application") or "existing worker session; model/effort application unknown"
+                store.member(member, settings)
             except RoomError as exc:
                 warnings.append(str(exc))
             # Fresh launches receive the appendix. Resume/compaction must remain
