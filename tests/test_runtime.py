@@ -223,10 +223,12 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT body FROM messages WHERE id=?", (sent["id"],)).fetchone()[0], body)
         self.wait(lambda: self.effects("peer_cli"))
         self.assertEqual(self.effects("peer_cli")[0]["data"]["returncode"], 0)
-        self.wait(lambda: any(effect["data"].get("from") == "CODEX_EXPERT"
+        # Members are dispatched concurrently, so FYI copies to other Claude members can arrive first:
+        # pick the packet delivered to this session, not the first packet from CODEX_EXPERT.
+        self.wait(lambda: any(effect["data"].get("from") == "CODEX_EXPERT" and effect["data"].get("session_id") == self.session
                                for effect in self.effects("claude_inbox")))
         packet = next(effect["data"] for effect in self.effects("claude_inbox")
-                      if effect["data"].get("from") == "CODEX_EXPERT")
+                      if effect["data"].get("from") == "CODEX_EXPERT" and effect["data"].get("session_id") == self.session)
         self.assertEqual(packet["from"], "CODEX_EXPERT")
         self.assertEqual(packet["session_id"], self.session)
         self.assertIn("NOT admin consent", packet["message"]["content"])
