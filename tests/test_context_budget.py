@@ -29,7 +29,8 @@ BUDGETS = {
     "review_delivery_total": 2050,
     "review_fyi_total": 1300,
     "status_compact_one_task": 2700,
-    "main_sessionstart_context": 1100,
+    # 2026-10-02: +20 bytes buy the admin's eight-section reply shape (6. Risks, 7. AIIdeas) in the guidance line.
+    "main_sessionstart_context": 1120,
     "admin_prompt_context": 300,
     # DEC-020 (2026-10-01): cap wrapper bytes using the longest generated notice ID and max receipt ID.
     "admin_notice_delivery_overhead": 550,

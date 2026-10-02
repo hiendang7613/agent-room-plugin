@@ -94,7 +94,7 @@ You never write JSON, look up record IDs or route messages. The gateway handles 
 ## Readable reports
 
 Agent Room installs [i-have-asd-ste100](https://github.com/hiendang7613/i-have-asd-ste100), so every report from the room has the same shape:
-key-first bullets, then a one-sentence conclusion, then six fixed sections. A report looks like this:
+key-first bullets, then a one-sentence conclusion, then eight fixed sections. A report looks like this:
 
 - **Review:** CODEX_EXPERT approved the login fix after reading the diff.
 - **Tests:** `npm test` ran 214 tests; 213 pass.
@@ -113,7 +113,12 @@ key-first bullets, then a one-sentence conclusion, then six fixed sections. A re
 4. **Todos:**
    - **Payment test:** CODEX_01 checks `payment.spec.ts:88`.
 5. **Backlog:**
-   - **jsonwebtoken:** update in a separate change.
+6. **Risks:**
+   - **R1.** `jsonwebtoken` 8.5.1 is older than the 9.0.0 security release.
+     - `<a>` update it in a separate change | (b) skip | (c) later
+7. **AIIdeas:**
+   - **I1.** Add a test for the `Authorization` header.
+     - `<a>` plan it | (b) skip | (c) later
 
 It works in any language. Say `stop ste mode` to pause it for a session.
 

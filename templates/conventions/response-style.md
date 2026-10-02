@@ -11,7 +11,7 @@ A one-fact answer is one or two sentences. Otherwise:
 1. A short body of key-first bullets: each line starts with a bold word or a `path`.
 2. A bold `**Conclusion:**` line with the result in one sentence. Bad news first: failure, skip, blocker,
    unverified work.
-3. One blank line, then all six sections as one numbered list from 0, with no blank lines between items.
+3. One blank line, then all eight sections as one numbered list from 0, with no blank lines between items.
    An empty section shows only its label.
 
 ```
@@ -28,13 +28,21 @@ A one-fact answer is one or two sentences. Otherwise:
 4. **Todos:**
    - **Payment test:** check why `payment.spec.ts:88` fails.
 5. **Backlog:**
-   - **jsonwebtoken:** update in a separate change.
+   - **Docs:** update the login guide later.
+6. **Risks:**
+   - **R1.** `jsonwebtoken` 8.5.1 is older than the 9.0.0 security release.
+     - `<a>` update it in a separate change | (b) skip | (c) later
+7. **AIIdeas:**
+   - **I1.** Add a test for the `Authorization` header.
+     - `<a>` plan it | (b) skip | (c) later
 ```
 
 Write each item as a sub-item that starts with a bold key, never as plain text after the label:
 Done holds finished and checked work with its evidence; InProgress, work running now and who runs it;
-Pending, work waiting for someone or something else; Questions, everything that needs the admin;
-Todos, work in the current task done next, in order; Backlog, work deferred to later or optional.
+Pending, work waiting for someone or something else; Questions, approvals, choices and steps only the admin
+can do; Todos, work in the current task done next, in order; Backlog, work deferred to later or optional;
+Risks, each **R1.** with a choice line (an empty Risks label means you checked and found none); AIIdeas,
+each **I1.** idea with a choice line. Work you may do without asking goes to Todos.
 
 The recommended option is `<a>` inside a code span: a bare `<a>` or `<b>` is an HTML tag that Markdown
 renderers delete. Other options are (b), (c). Start an approval with "Approve:".

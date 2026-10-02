@@ -71,8 +71,9 @@ state before acting on work. After processing, use `ack` to record what you proc
 ACK-only reply loops. Use `send` for substantive conversation and handoffs; native
 final text is retained in event history but is not automatically broadcast to every member.
 
-Admin replies follow the admin's chosen shape: key-first bullets, a bold Conclusion line, a blank line, then all six
-sections as one list: 0. Done, 1. InProgress, 2. Pending, 3. Questions, 4. Todos, 5. Backlog (empty ones show only the label).
+Admin replies follow the admin's chosen shape: key-first bullets, a bold Conclusion line, a blank line, then all eight
+sections as one list: 0. Done, 1. InProgress, 2. Pending, 3. Questions, 4. Todos, 5. Backlog, 6. Risks, 7. AIIdeas (empty ones
+show only the label).
 Preserve exact strings, numbers, negations, conditions, authority, uncertainty and evidence level.
 Give full detail when requested or needed for a safe, supported decision. See conventions/response-style.md.
 Support "gọn", "chi tiết <topic>" and "tổng kết". Questions include impact, recommendation and an easy answer format.
