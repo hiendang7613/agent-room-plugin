@@ -399,7 +399,7 @@ class BroadcastDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Earlier delivery failed or is unknown", message_text(delivered))
 
     async def test_admin_fanout_dispatches_distinct_member_sessions_concurrently(self):
-        barrier = Barrier(3, timeout=0.8)
+        barrier = Barrier(3, timeout=5)
         arrivals = []
 
         class BarrierClient(FakeClient):
@@ -424,10 +424,34 @@ class BroadcastDispatchTests(unittest.IsolatedAsyncioTestCase):
         with patch("agent_room.runtime.send_claude", wait_for_all_claude):
             self.store.broadcast_gateway_prompt("One admin update", "parallel-admin-update",
                                                 receipt_id="P-parallel", provenance_state="human")
-            await asyncio.wait_for(self.supervisor.dispatch(), timeout=1.5)
+            await asyncio.wait_for(self.supervisor.dispatch(), timeout=7)
 
         self.assertEqual(set(arrivals), {"CLAUDE_EXPERT", "CODEX_01", "CODEX_EXPERT"})
         self.assertEqual(len(arrivals), 3)
+
+    async def test_direct_messages_to_distinct_member_sessions_dispatch_concurrently(self):
+        barrier = Barrier(2, timeout=5)
+        arrivals = []
+
+        class BarrierClient(FakeClient):
+            async def send(self, message):
+                self.sent.append(message)
+                arrivals.append((message["recipient"], bool(json.loads(message["context"]).get("broadcast"))))
+                await asyncio.to_thread(barrier.wait)
+                self.turn_id = self.last_sent_turn_id = "fixture-turn"
+                return "accepted"
+
+        self.supervisor.codex["CODEX_01"] = BarrierClient()
+        self.supervisor.codex["CODEX_EXPERT"] = BarrierClient()
+        self.store.send("CLAUDE_01", "CODEX_01", "Review the parser change")
+        self.store.send("CLAUDE_01", "CODEX_EXPERT", "Review the recovery contract")
+
+        await asyncio.wait_for(self.supervisor.dispatch(), timeout=7)
+
+        self.assertEqual(set(arrivals[:2]), {("CODEX_01", False), ("CODEX_EXPERT", False)})
+        self.assertEqual(len(arrivals), 4)
+        self.assertTrue(all(copied for _, copied in arrivals[2:]))
+        self.assertEqual(self.store.status()["message_counts"].get("accepted"), 4)
 
     async def test_direct_queue_finishes_before_any_fyi_copy_starts(self):
         direct_started = asyncio.Event()

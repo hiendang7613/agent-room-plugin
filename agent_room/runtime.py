@@ -347,9 +347,9 @@ class Supervisor:
             direct = [message for batch in zip_longest(*direct_queues) for message in batch if message is not None][:20]
             remaining = 20 - len(direct)
             fyis = [message for batch in zip_longest(*broadcast_queues) for message in batch if message is not None][:remaining]
-        # Native sends to different member sessions are independent. Keep each
-        # member's inbox serial (and direct-before-FYI), but do not make a slow
-        # socket or app-server response hold up every other member.
+        # Native sends to different member sessions start independently. Keep
+        # each inbox serial and direct-before-FYI; a long recipient backlog can
+        # still hold up the phase barrier below.
         for phase in (direct, fyis):
             queues = {}
             for message in phase:
