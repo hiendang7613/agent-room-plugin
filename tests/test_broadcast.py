@@ -356,6 +356,30 @@ class BroadcastDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.status()["incomplete_notifications"], [])
         self.assertEqual(message["body"], "Debate this proposal")
 
+    async def test_admin_relay_backlog_does_not_starve_direct_work(self):
+        for name in MEMBERS:
+            if name != "CODEX_EXPERT":
+                self.store.member(name, {"status": "stopped"})
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AGENT_ROOM_MEMBER", None)
+            for index in range(20):
+                self.store.broadcast_gateway_prompt(
+                    f"Admin notice {index}",
+                    f"prompt-key-{index}",
+                    receipt_id=f"P-backlog-{index}",
+                    provenance_state="human",
+                )
+        direct = self.store.send("CLAUDE_01", "CODEX_EXPERT", "Review this current patch")
+
+        await self.supervisor.dispatch()
+
+        sent = self.clients["CODEX_EXPERT"].sent
+        self.assertEqual(len(sent), 21)
+        self.assertEqual(sent[0]["id"], direct["id"], "Direct work keeps its priority")
+        relays = [message for message in sent if json.loads(message["context"]).get("admin_relay")]
+        self.assertEqual(len(relays), 20, "Admin relays use the bounded FYI allowance")
+        self.assertTrue(all(message["id"] != direct["id"] for message in relays))
+
     async def test_stopped_room_keeps_messages_queued_without_claiming_a_wake(self):
         with self.store.tx() as db:
             room = self.store.get_room(db)
@@ -506,6 +530,36 @@ class BroadcastDispatchTests(unittest.IsolatedAsyncioTestCase):
             copy = db.execute("SELECT status FROM messages WHERE id=? AND recipient='CODEX_EXPERT'",
                               (copies[0]["id"],)).fetchone()
         self.assertEqual(copy["status"], "accepted")
+
+    async def test_same_recipient_direct_backlog_does_not_starve_its_fyi_copy(self):
+        self.store.member("CLAUDE_EXPERT", {"status": "stopped"})
+        with self.store.tx() as db:
+            for index in range(21):
+                self.store.queue(db, "CLAUDE_01", "CODEX_EXPERT", f"Direct backlog {index}")
+        for index in range(21):
+            self.store.send("CLAUDE_01", "CODEX_01", f"Notify the full room {index}")
+
+        await self.supervisor.dispatch()
+
+        sent = self.clients["CODEX_EXPERT"].sent
+        self.assertEqual(len(sent), 40)
+        self.assertEqual([message["body"] for message in sent[:20]],
+                         [f"Direct backlog {index}" for index in range(20)])
+        sent_copies = [message for message in sent
+                       if json.loads(message["context"]).get("broadcast", {}).get("id")]
+        self.assertEqual(len(sent_copies), 20)
+        self.assertEqual([message["body"] for message in sent_copies],
+                         [f"Notify the full room {index}" for index in range(20)])
+        pending = self.store.inbox("CODEX_EXPERT")["items"]
+        self.assertEqual(sum(message["status"] == "queued" for message in pending), 2)
+        self.assertTrue(any(message["body"] == "Direct backlog 20" and message["status"] == "queued"
+                            for message in pending))
+        self.assertTrue(any(message["body"] == "Notify the full room 20" and message["status"] == "queued"
+                            for message in pending))
+        with self.store.read() as db:
+            accepted = db.execute("SELECT count(*) FROM messages WHERE recipient='CODEX_EXPERT' "
+                                  "AND status='accepted'").fetchone()[0]
+        self.assertEqual(accepted, 40)
 
     async def test_recipient_queues_keep_fifo_and_never_overlap_native_sends(self):
         class TrackingClient(FakeClient):

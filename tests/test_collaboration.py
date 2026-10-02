@@ -315,7 +315,11 @@ class CollaborationTests(unittest.IsolatedAsyncioTestCase):
         supervisor = Supervisor(self.store, self.generation)
         supervisor.codex = clients
         await supervisor.dispatch()
-        self.assertEqual([len(client.sent) for client in clients.values()], [20, 20])
+        self.assertEqual([len(client.sent) for client in clients.values()], [40, 40])
+        for client in clients.values():
+            first_batch_contexts = [json.loads(message["context"]) for message in client.sent]
+            self.assertTrue(all("broadcast" not in context for context in first_batch_contexts[:20]))
+            self.assertTrue(all("broadcast" in context for context in first_batch_contexts[20:40]))
         for _ in range(4):
             await supervisor.dispatch()
         for name, client in clients.items():

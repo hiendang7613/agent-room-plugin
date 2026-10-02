@@ -337,14 +337,14 @@ class Supervisor:
                 member = json.loads(db.execute("SELECT data FROM members WHERE name=?", (name,)).fetchone()[0])
                 if member["status"] not in paused:
                     direct = [dict(row) for row in db.execute(
-                        "SELECT * FROM messages WHERE status='queued' AND recipient=? "
-                        "AND json_extract(context,'$.broadcast.id') IS NULL ORDER BY seq LIMIT 20", (name,))]
+                        f"SELECT * FROM messages WHERE status='queued' AND recipient=? "
+                        f"AND NOT {FYI_CONTEXT_SQL} ORDER BY seq LIMIT 20", (name,))]
                     fyis = [dict(row) for row in db.execute(
-                        "SELECT * FROM messages WHERE status='queued' AND recipient=? "
-                        "AND json_extract(context,'$.broadcast.id') IS NOT NULL ORDER BY seq LIMIT 20", (name,))]
-                    # Bound work per inbox. Direct work gets that recipient's
-                    # first slots; one busy inbox cannot consume another's FYI allowance.
-                    queues[name] = (direct + fyis)[:20]
+                        f"SELECT * FROM messages WHERE status='queued' AND recipient=? "
+                        f"AND {FYI_CONTEXT_SQL} ORDER BY seq LIMIT 20", (name,))]
+                    # Bound each delivery class per inbox. Keep direct work first,
+                    # but do not let a full direct batch starve required room FYIs.
+                    queues[name] = direct + fyis
         queues = {target: messages for target, messages in queues.items() if messages}
 
         # Keep direct priority and FIFO within each delivery class, but start
