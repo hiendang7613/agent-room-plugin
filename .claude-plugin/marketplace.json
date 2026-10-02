@@ -9,7 +9,7 @@
       "name": "agent-room",
       "source": "./",
       "description": "Native Claude Code + Codex rooms",
-      "version": "0.3.21"
+      "version": "0.3.22"
     },
     {
       "name": "i-have-asd-ste100",

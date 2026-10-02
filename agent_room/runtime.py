@@ -347,11 +347,29 @@ class Supervisor:
             direct = [message for batch in zip_longest(*direct_queues) for message in batch if message is not None][:20]
             remaining = 20 - len(direct)
             fyis = [message for batch in zip_longest(*broadcast_queues) for message in batch if message is not None][:remaining]
-            messages = direct + fyis
+        # Native sends to different member sessions are independent. Keep each
+        # member's inbox serial (and direct-before-FYI), but do not make a slow
+        # socket or app-server response hold up every other member.
+        for phase in (direct, fyis):
+            queues = {}
+            for message in phase:
+                target = message["recipient"]
+                if target in MODES[room["mode"]]:
+                    queues.setdefault(target, []).append(message)
+            outcomes = await asyncio.gather(
+                *(self._dispatch_member_queue(target, queue, paused) for target, queue in queues.items()),
+                return_exceptions=True,
+            )
+            # Wait for every recipient in this phase before surfacing an
+            # unexpected failure. Other members may already have side effects;
+            # unfinished dispatch attempts remain recoverable as unknown.
+            for outcome in outcomes:
+                if isinstance(outcome, BaseException):
+                    raise outcome
+
+    async def _dispatch_member_queue(self, target, messages, paused):
+        """Dispatch one recipient's ordered queue without overlapping its native turns."""
         for message in messages:
-            target = message["recipient"]
-            if target not in MODES[room["mode"]]:
-                continue
             member = self.store.member(target)
             if member["status"] in paused:
                 continue

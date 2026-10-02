@@ -397,3 +397,125 @@ class BroadcastDispatchTests(unittest.IsolatedAsyncioTestCase):
         delivered = next(message for message in client.sent if message["id"] == direct["id"])
         self.assertFalse(delivered["pending_recovery"])
         self.assertNotIn("Earlier delivery failed or is unknown", message_text(delivered))
+
+    async def test_admin_fanout_dispatches_distinct_member_sessions_concurrently(self):
+        barrier = Barrier(3, timeout=0.8)
+        arrivals = []
+
+        class BarrierClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+
+            async def send(self, message):
+                self.sent.append(message)
+                arrivals.append(message["recipient"])
+                await asyncio.to_thread(barrier.wait)
+                self.turn_id = self.last_sent_turn_id = "fixture-turn"
+                return "accepted"
+
+        self.supervisor.codex["CODEX_01"] = BarrierClient()
+        self.supervisor.codex["CODEX_EXPERT"] = BarrierClient()
+
+        def wait_for_all_claude(project, native_id, message, mode):
+            arrivals.append(message["recipient"])
+            barrier.wait()
+            return "submitted"
+
+        with patch("agent_room.runtime.send_claude", wait_for_all_claude):
+            self.store.broadcast_gateway_prompt("One admin update", "parallel-admin-update",
+                                                receipt_id="P-parallel", provenance_state="human")
+            await asyncio.wait_for(self.supervisor.dispatch(), timeout=1.5)
+
+        self.assertEqual(set(arrivals), {"CLAUDE_EXPERT", "CODEX_01", "CODEX_EXPERT"})
+        self.assertEqual(len(arrivals), 3)
+
+    async def test_direct_queue_finishes_before_any_fyi_copy_starts(self):
+        direct_started = asyncio.Event()
+        release_direct = asyncio.Event()
+
+        class HeldClient(FakeClient):
+            async def send(self, message):
+                self.sent.append(message)
+                direct_started.set()
+                await release_direct.wait()
+                self.turn_id = self.last_sent_turn_id = "fixture-turn"
+                return "accepted"
+
+        held = HeldClient()
+        self.supervisor.codex["CODEX_01"] = held
+        self.store.send("CLAUDE_01", "CODEX_01", "Do the requested review")
+        dispatch = asyncio.create_task(self.supervisor.dispatch())
+        try:
+            await asyncio.wait_for(direct_started.wait(), timeout=0.5)
+            self.assertEqual(self.claude_sent, [])
+            self.assertEqual(self.clients["CODEX_EXPERT"].sent, [])
+        finally:
+            release_direct.set()
+        await asyncio.wait_for(dispatch, timeout=1)
+        self.assertEqual(len(self.claude_sent), 1)
+        self.assertEqual(len(self.clients["CODEX_EXPERT"].sent), 1)
+
+    async def test_recipient_queues_keep_fifo_and_never_overlap_native_sends(self):
+        class TrackingClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.active = 0
+                self.max_active = 0
+
+            async def send(self, message):
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+                self.sent.append(message)
+                try:
+                    await asyncio.sleep(0.005)
+                    self.turn_id = self.last_sent_turn_id = "fixture-turn"
+                    return "accepted"
+                finally:
+                    self.active -= 1
+
+        first = TrackingClient()
+        second = TrackingClient()
+        self.supervisor.codex["CODEX_01"] = first
+        self.supervisor.codex["CODEX_EXPERT"] = second
+        for key, body, receipt in (
+            ("ordered-admin-1", "First update", "P-first"),
+            ("ordered-admin-2", "Second update", "P-second"),
+        ):
+            self.store.broadcast_gateway_prompt(body, key, receipt_id=receipt, provenance_state="human")
+
+        await self.supervisor.dispatch()
+
+        self.assertEqual([item["body"] for item in first.sent], ["First update", "Second update"])
+        self.assertEqual([item["body"] for item in second.sent], ["First update", "Second update"])
+        self.assertEqual((first.max_active, second.max_active), (1, 1))
+        self.assertEqual([item["body"] for item in self.claude_sent], ["First update", "Second update"])
+
+    async def test_unexpected_member_failure_waits_for_other_recipients_then_propagates(self):
+        class ExplodingClient(FakeClient):
+            async def send(self, message):
+                self.sent.append(message)
+                raise RuntimeError("fixture client failure")
+
+        class CompletingClient(FakeClient):
+            async def send(self, message):
+                self.sent.append(message)
+                await asyncio.sleep(0.01)
+                self.turn_id = self.last_sent_turn_id = "fixture-turn"
+                return "accepted"
+
+        self.supervisor.codex["CODEX_01"] = ExplodingClient()
+        self.supervisor.codex["CODEX_EXPERT"] = CompletingClient()
+        self.store.broadcast_gateway_prompt("Independent deliveries", "partial-failure",
+                                            receipt_id="P-partial", provenance_state="human")
+
+        with self.assertRaisesRegex(RuntimeError, "fixture client failure"):
+            await self.supervisor.dispatch()
+
+        self.assertEqual(len(self.claude_sent), 1)
+        self.assertEqual(len(self.supervisor.codex["CODEX_EXPERT"].sent), 1)
+        self.assertEqual(self.store.status()["message_counts"].get("accepted"), 1)
+        self.assertEqual(self.store.status()["message_counts"].get("submitted"), 1)
+        for name in MEMBERS:
+            self.store.member(name, {"native_id": None, "pid": None, "stamp": None})
+        await self.supervisor.recover_owned()
+        self.assertEqual(self.store.status()["message_counts"].get("unknown"), 1)
