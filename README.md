@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-4F46E5"></a>
-  <img alt="Version 0.3.20" src="https://img.shields.io/badge/version-0.3.20-4F46E5">
+  <img alt="Version 0.3.21" src="https://img.shields.io/badge/version-0.3.21-4F46E5">
   <img alt="Claude Code and Codex" src="https://img.shields.io/badge/members-Claude%20Code%20%2B%20Codex-0F172A">
   <img alt="Offline tests" src="https://img.shields.io/badge/offline%20tests-364-16A34A">
   <a href="https://github.com/hiendang7613/i-have-asd-ste100"><img alt="Reports by i-have-asd-ste100" src="https://img.shields.io/badge/reports-i--have--asd--ste100-F59E0B"></a>
