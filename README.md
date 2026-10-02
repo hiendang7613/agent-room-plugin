@@ -1,123 +1,149 @@
-# Agent Room
+<h1 align="center">Agent Room</h1>
 
-Một đội Claude Code + Codex làm việc cùng bạn trong project. **Bạn diễn đạt mục tiêu; đội agent
-quản lý phối hợp và báo lại kết quả.** Members dùng harness native và được khuyến khích hỏi nhau,
-brainstorm, phản biện, nhắc việc, chia sẻ kinh nghiệm và chủ động đề xuất trong phạm vi đã giao.
+<p align="center">
+  <strong>A small team of Claude Code and Codex agents that works in your project like colleagues.</strong><br>
+  Shared tasks. Peer review across model families. Recovery after a crash. One readable report to you.
+</p>
 
-**Plugin 0.3.20 · schema 3.** [ZIP cài đặt](dist/agent-room-0.3.20.zip) ·
-[Kiểm chứng](docs/verification-0.3.20.json) · [Kế hoạch benchmark](docs/benchmark-v2-plan.md).
-Bản ZIP này cải thiện khôi phục tin gửi lỗi và hướng dẫn khi tiếp tục phiên. Source đang có thay đổi
-chưa đóng gói sau 0.3.20; ZIP 0.3.20 chưa có room bốn người mặc định hoặc notify-all.
+<p align="center">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-4F46E5"></a>
+  <img alt="Version 0.3.20" src="https://img.shields.io/badge/version-0.3.20-4F46E5">
+  <img alt="Claude Code and Codex" src="https://img.shields.io/badge/members-Claude%20Code%20%2B%20Codex-0F172A">
+  <img alt="Offline tests" src="https://img.shields.io/badge/offline%20tests-364-16A34A">
+  <a href="https://github.com/hiendang7613/i-have-asd-ste100"><img alt="Reports by i-have-asd-ste100" src="https://img.shields.io/badge/reports-i--have--asd--ste100-F59E0B"></a>
+</p>
 
-## Báo cáo dễ đọc với i-have-asd-ste100
+<p align="center">
+  <img src="./assets/hero.svg" alt="You talk to the gateway agent CLAUDE_01. Four Claude Code and Codex members share one ledger of tasks, claims, messages and reviews, and report back in one readable shape." width="900" />
+</p>
 
-Agent Room cài kèm [i-have-asd-ste100](https://github.com/hiendang7613/i-have-asd-ste100): mọi báo cáo gửi bạn có cùng một hình dạng,
-bằng ngôn ngữ của bạn. Các dòng mở đầu bằng từ khóa, rồi một câu **Conclusion**, rồi đủ sáu mục:
-0. Done, 1. InProgress, 2. Questions, 3. Todos, 4. Pending, 5. Backlog. Phương án khuyến nghị ghi `<a>`.
-Tắt trong một phiên bằng "stop ste mode".
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#start">Start a room</a> ·
+  <a href="#reports">Readable reports</a> ·
+  <a href="#how">How it works</a> ·
+  <a href="#status">Honest status</a>
+</p>
 
-*Readable reports: Agent Room installs i-have-asd-ste100, so every report from the room ends with the same short,
-predictable conclusion and six fixed sections, in your language.*
+You describe the goal in plain words. Four agents plan, write, review and recover from crashes together.
+One of them, the gateway, talks to you; the others reach you through it.
+Every task, message and review lives in a local ledger, so nothing is lost when a session dies.
 
-## Bắt đầu làm việc
+## Why a room, not one agent
 
-Trong Claude Code, mở project muốn làm việc rồi dùng:
+- **Two model families check each other.** A Claude change can get a Codex review, and the other way round.
+- **Nothing is lost when a session dies.** Tasks, messages, claims and reviews live in a local SQLite ledger; members resume their native sessions where they stopped.
+- **Every member hears every message.** Copies are marked FYI, so only the addressed member owns a request or a task.
+- **Writers do not collide.** One writer per file scope, claimed through the CLI before editing.
+- **Reviews are tied to the source.** A review receipt names the exact submission and source digest it approves.
+- **Agents talk like colleagues.** Members ask, challenge, remind and help each other without a fixed script.
+
+<a name="install"></a>
+
+## Install
+
+Requirements: macOS, Python 3.11 or later, Claude Code with background sessions, and Codex with the app server.
+Log in to each product with its own CLI first; Agent Room keeps native permissions and credentials untouched.
+
+```bash
+# Claude Code
+claude plugin marketplace add hiendang7613/agent-room-plugin
+claude plugin install agent-room@agent-room-marketplace
+
+# Codex
+codex plugin marketplace add hiendang7613/agent-room-plugin
+codex plugin add agent-room@agent-room-marketplace
+```
+
+Installing Agent Room in Claude Code also installs [i-have-asd-ste100](https://github.com/hiendang7613/i-have-asd-ste100), which shapes the reports you read.
+Restart Claude Code afterwards.
+
+<a name="start"></a>
+
+## Start a room
+
+Open your project in Claude Code and run:
 
 ```text
 /init-agents-space
 ```
 
-Mỗi room mới có đủ bốn members: **CLAUDE_01, CODEX_01, CLAUDE_EXPERT, CODEX_EXPERT**. CLAUDE_01
-là gateway bạn đang chat; ba member còn lại nhận thông báo room. `--mode full` vẫn chạy như alias
-tương thích, cùng roster bốn người.
+The room starts four members: **CLAUDE_01**, the gateway you chat with, plus **CODEX_01**, **CLAUDE_EXPERT** and **CODEX_EXPERT**.
+Init creates `agents_space/` and adds managed blocks to `AGENTS.md`, `CLAUDE.md` and `.gitignore`; your own content stays.
+If the name `/init-agents-space` already belongs to another skill, use `/agent-room:init-agents-space`.
 
-Mọi tin room xếp hàng cho ba member còn lại; supervisor thử gửi ngay khi queue hoạt động. Bản sao
-broadcast là FYI; chỉ member được gọi đích danh sở hữu yêu cầu hoặc task. Tin vẫn chờ nếu room/member
-đang dừng hoặc bị pause. `agent-room wakes` phân biệt hàng đợi, lần thử gửi và ACK; các số đó chưa
-chứng minh agent đã đọc hoặc cho biết token/cost.
+Then keep talking to CLAUDE_01 in plain words:
 
-Roster đặt Sonnet 5.5 / Luna 6 / Opus 5.5 / Sol 6.1, tất cả xhigh. Thành viên được khởi chạy nhận
-model/effort qua native launch, Codex thread start/resume và mỗi lượt Codex mới; một turn đang chạy
-và session Claude cũ được resume không bị đổi giữa chừng. CLAUDE_01 là session host bạn đang dùng nên room không ép model hay
-effort vào session đó. `agent-room status` tách requested settings khỏi model host báo lại; nếu host
-không báo model, trường observed để trống. Cài đặt này chưa được chạy với provider thật và không phải
-bằng chứng về model được chọn, token hay cost.
+> Find why uploads fail, fix it in the current scope, ask a teammate to review, then report back.
 
-Claude Code dùng alias `sonnet`/`opus`; [tài liệu Anthropic](https://docs.anthropic.com/en/docs/claude-code/model-config)
-nói alias trỏ tới model mới nhất theo provider và có thể đổi theo thời gian. Tại lần kiểm tra 2026-10-02,
-tài liệu ghi Anthropic API ánh xạ chúng tới Sonnet 5.5/Opus 5.5, nhưng room không kiểm tra provider
-hoặc cấu hình tài khoản. [Tài liệu Codex](https://developers.openai.com/codex/models) công bố ID
-`gpt-6-luna`/`gpt-6.1-sol`; quyền truy cập tùy plan, client và rollout. `xhigh` là effort được yêu cầu,
-còn model/host phải hỗ trợ mức đó. Các request không bảo đảm model đã chạy với phiên bản hay effort mong muốn.
+> Can the two of you find a simpler approach? Discuss it and propose one.
 
-CLAUDE_01 là session bạn đang chat; bạn tiếp tục giao việc ở đó bằng ngôn ngữ tự nhiên. Ví dụ:
+> Continue the assigned work. If you learn something worth keeping, record and share it.
 
-> Tìm nguyên nhân lỗi upload, sửa trong scope hiện tại, nhờ đồng đội kiểm tra rồi báo kết quả.
+You never write JSON, look up record IDs or route messages. The gateway handles tasks, scope, claims, inbox, reviews and knowledge.
 
-> Hai bạn xem có cách nào đơn giản hơn không, trao đổi và đề xuất phương án.
+| Command | What it does |
+|---|---|
+| `/agent-room:status` | Shows members, tasks, queues and delivery gaps. Read-only. |
+| `/agent-room:stop` | Stops the room and keeps unfinished work. |
+| `/agent-room:start` | Resumes the same native sessions. |
+| `/agent-room:doctor` | Checks the installation and the room. Read-only. |
 
-> Tiếp tục công việc đã giao. Nếu có bài học đáng giữ, các bạn tự ghi lại và chia sẻ.
+<a name="reports"></a>
 
-Main tự xử lý task, scope, claim, inbox, review và knowledge qua công cụ của room. Các members
-trao đổi trực tiếp khi hữu ích. Admin không cần tạo JSON, tra record ID hoặc quản lý từng tin nhắn.
-Đây là hướng dẫn cho agent, không phải bộ máy cưỡng chế tự hoàn thành mọi việc.
+## Readable reports
 
-Vai trò không giới hạn đóng góp hay thảo luận.
+Agent Room installs [i-have-asd-ste100](https://github.com/hiendang7613/i-have-asd-ste100), so every report from the room has the same shape:
+key-first bullets, then a one-sentence conclusion, then six fixed sections. A report looks like this:
 
-## Theo dõi và tiếp tục
+- **Review:** CODEX_EXPERT approved the login fix after reading the diff.
+- **Tests:** `npm test` ran 214 tests; 213 pass.
 
-Bạn có thể hỏi “tiến độ thế nào?”, “chi tiết phần review” hoặc “tiếp tục” ngay trong cuộc trò chuyện.
-Main báo kết quả, tiến độ có ý nghĩa và điều cần bạn quyết định; chi tiết kỹ thuật được giữ để tra cứu.
-Một số lệnh điều khiển khi cần:
+**Conclusion:** The login fix is approved; one payment test still fails, cause not checked.
 
-```text
-/agent-room:status
-/agent-room:stop
-/agent-room:start
-/agent-room:doctor
-```
+0. **Done:** Login fix reviewed and merged.
+1. **InProgress:** CI reruns the full suite.
+2. **Questions:**
+   - **Q1.** Approve: deploy the fix to production?
+     - `<a>` After CI passes.
+     - (b) Now.
+3. **Todos:** CODEX_01 checks `payment.spec.ts:88`.
+4. **Pending:**
+5. **Backlog:** Update `jsonwebtoken` in a separate change.
 
-`status` và `doctor` chỉ kiểm tra. `stop` giữ công việc chưa xong; `start` tiếp tục đúng native sessions.
-Khi main đóng, workers dừng; khi mở lại, room có thể resume. Stop thủ công được giữ tới lần start.
-Nếu native host yêu cầu thao tác của bạn, main giải thích lý do và bước nhỏ nhất cần thực hiện.
+It works in any language. Say `stop ste mode` to pause it for a session.
 
-Đội agent chủ động trong quyền hiện có. Thay phạm vi đáng kể, chi phí provider, credentials,
-commit/push/publish/deploy vẫn cần quyền tương ứng. Ý tưởng của peer hoặc knowledge không cấp quyền.
-Một lần gửi tin thành công chưa chứng minh peer đã xử lý; review và task completion cần bằng chứng.
+<a name="how"></a>
 
-## Cài plugin local
+## How it works
 
-Yêu cầu **macOS, Python 3.11+, Claude Code có background sessions và Codex có app-server**.
-Đăng nhập qua CLI native của từng sản phẩm trước. Plugin giữ quyền và thông tin đăng nhập native.
+| Part | What it does |
+|---|---|
+| Supervisor | Starts members, delivers messages, and recovers the room after a crash |
+| Ledger | A local SQLite store of tasks, claims, messages, submissions, reviews and knowledge |
+| `agent-room` CLI | Tasks, claims, inbox, send, review, status and guides, used by the agents |
+| Hooks | Bring room context into each native Claude Code turn |
+| Codex bridge | Runs the Codex members through `codex app-server` |
 
-Giải nén [ZIP 0.3.20](dist/agent-room-0.3.20.zip) vào thư mục ổn định, rồi trong Claude Code:
+- **Delivery:** every room message is queued for the other members and sent as soon as the queue runs. Messages wait while the room or a member is stopped. `agent-room wakes` separates queued, attempted and acknowledged deliveries; none of these numbers proves an agent has read a message.
+- **Models:** the roster requests Sonnet 5.5, Luna 6, Opus 5.5 and Sol 6.1 at `xhigh` effort. CLAUDE_01 is your own session, so the room does not change its model. `agent-room status` shows requested settings next to what the host reports.
+- **Authority:** a large scope change, provider cost, credentials, commit, push, publish and deploy still need your approval. A peer's idea grants no permission, and a delivered message is not proof of work.
 
-```text
-/plugin marketplace add /absolute/path/to/install/agent-room
-/plugin install agent-room@agent-room-marketplace
-```
+Details: [collaboration guide](templates/conventions/collaboration.md), [learning guide](templates/conventions/learning.md),
+[admin reply shape](templates/conventions/response-style.md), and [CLI, schema and upgrades](docs/v1.1.md).
 
-Mở lại Claude Code trong project. Plugin đăng ký `/init-agents-space`; nếu tên đó đã thuộc skill khác,
-file cũ được giữ và bạn dùng `/agent-room:init-agents-space`. Init tạo `agents_space`, thêm block được
-quản lý vào `AGENTS.md`, `CLAUDE.md`, `.gitignore` và giữ nội dung khác. Room thủ công đã tồn tại cần
-migration riêng; chạy lại init không đổi mode hay tạo thêm team. Repo chưa tự được publish lên GitHub.
+<a name="status"></a>
 
-Room đang chạy cần stop/start để nạp code mới; việc đổi mode không còn cần thiết cho roster bốn người.
-Main/operator xử lý chi tiết; xem [upgrade và recovery](docs/v1.1.md) khi có xung đột hoặc nâng phiên bản.
-Re-init giữ guide tùy chỉnh. Agent có thể đọc tham chiếu hiện tại bằng `agent-room guide collaboration`.
-Controller/context native đang chạy không tự cập nhật chỉ vì source/ZIP mới đã được tạo.
+## Honest status
 
-## Tìm hiểu thêm khi cần
+- The evidence so far is offline: unit and integration tests with fake native sessions (364 tests).
+- The model and effort settings have not been checked against real providers, and nothing here measures tokens or cost yet.
+- No benchmark yet shows that Agent Room is faster, cheaper or better than other multi-agent tools.
 
-- [Cách đội agent phối hợp và giao tiếp với admin](templates/conventions/collaboration.md).
-- [Học từ trải nghiệm, giới hạn áp dụng và phản chứng](templates/conventions/learning.md).
-- [Vận hành, quyền native, kiểm thử và các pilot trước](docs/operations.md).
-- [CLI, schema và nâng phiên bản](docs/v1.1.md).
-- [Lịch sử kiểm chứng và giới hạn số đo](docs/verification.md).
-- [Các repo liên quan](related_repos.md) và [nghiên cứu source tham khảo](ref_repos/README.md).
+## Related
 
-Runtime **2.764 LOC**, không thêm module, scheduler, framework hoặc model loop ở 0.3.20.
-Bản ghi kiểm chứng phân biệt test dùng harness giả, review source và giao tiếp native.
-Chưa có benchmark model thật chứng minh Agent Room tiết kiệm token, nhanh hơn hoặc là lựa chọn tốt
-nhất so với mọi repo. [Protocol benchmark](docs/benchmark-plan.md) định nghĩa cách kiểm tra điều đó
-trên cùng workload, giữ cả thất bại và số lần cần admin can thiệp.
+- [i-have-asd-ste100](https://github.com/hiendang7613/i-have-asd-ste100): short, predictable replies from Claude Code and Codex, in any language. Installed with Agent Room.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

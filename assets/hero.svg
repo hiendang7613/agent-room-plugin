@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="t d">
+<title id="t">Agent Room</title><desc id="d">You talk to one gateway agent. Four Claude Code and Codex members share one ledger of tasks, claims, messages and reviews, and report back in one readable shape.</desc>
+<style>.h{font:700 22px -apple-system,"Segoe UI",Helvetica,Arial,sans-serif}.b{font:600 17px -apple-system,"Segoe UI",Helvetica,Arial,sans-serif}.s{font:14px -apple-system,"Segoe UI",Helvetica,Arial,sans-serif}.m{font:15px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}</style>
+<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0B1020"/><stop offset="1" stop-color="#1E1B4B"/></linearGradient>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#818CF8"/></marker></defs>
+<rect width="1200" height="560" rx="20" fill="url(#bg)"/>
+<text x="40" y="52" class="h" fill="#E0E7FF">One gateway. Four agents. One shared ledger.</text>
+<rect x="40" y="120" width="150" height="70" rx="14" fill="#1F2937" stroke="#64748B" stroke-width="2"/>
+<text x="115" y="150" text-anchor="middle" class="b" fill="#F8FAFC">You</text>
+<text x="115" y="172" text-anchor="middle" class="s" fill="#94A3B8">goal in plain words</text>
+<rect x="250" y="120" width="210" height="70" rx="14" fill="#111827" stroke="#A5B4FC" stroke-width="2"/>
+<text x="355" y="150" text-anchor="middle" class="b" fill="#F8FAFC">CLAUDE_01</text>
+<text x="355" y="172" text-anchor="middle" class="s" fill="#94A3B8">Claude worker, your gateway</text>
+<line x1="190" y1="155" x2="250" y2="155" stroke="#818CF8" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+<rect x="250" y="240" width="210" height="150" rx="14" fill="#1E1B4B" stroke="#6366F1" stroke-width="2"/>
+<text x="355" y="270" text-anchor="middle" class="b" fill="#F8FAFC">Room ledger</text>
+<text x="355" y="292" text-anchor="middle" class="s" fill="#94A3B8"></text>
+<text x="355" y="300" text-anchor="middle" class="s" fill="#C7D2FE">tasks and writer claims</text>
+<text x="355" y="321" text-anchor="middle" class="s" fill="#C7D2FE">messages to every member</text>
+<text x="355" y="342" text-anchor="middle" class="s" fill="#C7D2FE">source-bound reviews</text>
+<text x="355" y="363" text-anchor="middle" class="s" fill="#C7D2FE">crash recovery</text>
+<line x1="355" y1="190" x2="355" y2="240" stroke="#818CF8" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+<rect x="40" y="430" width="170" height="70" rx="14" fill="#111827" stroke="#34D399" stroke-width="2"/>
+<text x="125" y="460" text-anchor="middle" class="b" fill="#F8FAFC">CODEX_01</text>
+<text x="125" y="482" text-anchor="middle" class="s" fill="#94A3B8">Codex worker</text>
+<rect x="270" y="430" width="170" height="70" rx="14" fill="#111827" stroke="#A5B4FC" stroke-width="2"/>
+<text x="355" y="460" text-anchor="middle" class="b" fill="#F8FAFC">CLAUDE_EXPERT</text>
+<text x="355" y="482" text-anchor="middle" class="s" fill="#94A3B8">Claude expert</text>
+<rect x="500" y="430" width="170" height="70" rx="14" fill="#111827" stroke="#34D399" stroke-width="2"/>
+<text x="585" y="460" text-anchor="middle" class="b" fill="#F8FAFC">CODEX_EXPERT</text>
+<text x="585" y="482" text-anchor="middle" class="s" fill="#94A3B8">Codex expert</text>
+<line x1="125" y1="430" x2="300" y2="390" stroke="#818CF8" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+<line x1="355" y1="430" x2="355" y2="390" stroke="#818CF8" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+<line x1="585" y1="430" x2="410" y2="390" stroke="#818CF8" stroke-width="2" marker-end="url(#a)" marker-start="url(#a)"/>
+<rect x="720" y="110" width="440" height="400" rx="14" fill="#111827" stroke="#374151" stroke-width="2"/>
+<circle cx="742" cy="132" r="6" fill="#F87171"/><circle cx="762" cy="132" r="6" fill="#FBBF24"/><circle cx="782" cy="132" r="6" fill="#34D399"/>
+<text x="940" y="137" text-anchor="middle" class="s" fill="#6B7280">report from the room</text>
+<text x="742" y="176" class="m" xml:space="preserve"><tspan fill="#6B7280">- </tspan><tspan fill="#E5E7EB" font-weight="700">Review:</tspan><tspan fill="#E5E7EB"> CODEX_EXPERT approved the fix.</tspan></text>
+<text x="742" y="201" class="m" xml:space="preserve"><tspan fill="#6B7280">- </tspan><tspan fill="#E5E7EB" font-weight="700">Tests:</tspan><tspan fill="#E5E7EB"> 213 of 214 pass.</tspan></text>
+<text x="742" y="236" class="m" xml:space="preserve"><tspan fill="#A5B4FC" font-weight="700">Conclusion:</tspan><tspan fill="#E5E7EB"> fix approved; 1 test fails.</tspan></text>
+<text x="742" y="271" class="m" xml:space="preserve"><tspan fill="#6B7280">0. </tspan><tspan fill="#A5B4FC" font-weight="700">Done:</tspan><tspan fill="#E5E7EB"> login fix reviewed.</tspan></text>
+<text x="742" y="296" class="m" xml:space="preserve"><tspan fill="#6B7280">1. </tspan><tspan fill="#A5B4FC" font-weight="700">InProgress:</tspan><tspan fill="#E5E7EB"> CI rerun.</tspan></text>
+<text x="742" y="321" class="m" xml:space="preserve"><tspan fill="#6B7280">2. </tspan><tspan fill="#A5B4FC" font-weight="700">Questions:</tspan></text>
+<text x="742" y="346" class="m" xml:space="preserve"><tspan fill="#6B7280">   - </tspan><tspan fill="#E5E7EB" font-weight="700">Q1.</tspan><tspan fill="#86EFAC"> Approve: deploy?</tspan></text>
+<text x="742" y="371" class="m" xml:space="preserve"><tspan fill="#6B7280">     - </tspan><tspan fill="#7DD3FC">&lt;a&gt;</tspan><tspan fill="#E5E7EB"> after CI.</tspan></text>
+<text x="742" y="396" class="m" xml:space="preserve"><tspan fill="#6B7280">3. </tspan><tspan fill="#A5B4FC" font-weight="700">Todos:</tspan><tspan fill="#E5E7EB"> payment test.</tspan></text>
+<text x="742" y="421" class="m" xml:space="preserve"><tspan fill="#6B7280">4. </tspan><tspan fill="#A5B4FC" font-weight="700">Pending:</tspan></text>
+<text x="742" y="446" class="m" xml:space="preserve"><tspan fill="#6B7280">5. </tspan><tspan fill="#A5B4FC" font-weight="700">Backlog:</tspan><tspan fill="#E5E7EB"> token library.</tspan></text>
+<text x="940" y="540" text-anchor="middle" class="s" fill="#6B7280">Reports use the i-have-asd-ste100 shape (installed with Agent Room).</text>
+</svg>

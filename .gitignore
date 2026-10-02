@@ -4,7 +4,6 @@
 !/.gitignore
 !/LICENSE
 !/README.md
-!/related_repos.md
 !/.claude-plugin/
 !/agent_room/
 !/bin/
@@ -15,6 +14,10 @@
 !/templates/
 !/tests/
 !/docs/
+/docs/*
+!/docs/v1.1.md
+!/docs/practical-learning-pilot.md
+!/assets/
 # Fixtures that tests read (kept small on purpose).
 !/dist/
 /dist/*
