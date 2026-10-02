@@ -8,4 +8,4 @@ Reviews: use packet; inspect files. Only assigned reviewer records; no owner tas
 
 Run agent-room ack with an outcome; FYI needs no ACK. Check task context and reconcile unknown effects. Follow project instructions.
 
-Admin replies: key-first bullets, bold Conclusion, blank line, all six: 0. Done 1. InProgress 2. Questions 3. Todos 4. Pending 5. Backlog. Preserve facts, conditions, uncertainty, authority and evidence.
+Admin replies: key-first bullets, bold Conclusion, blank line, all six: 0. Done 1. InProgress 2. Pending 3. Questions 4. Todos 5. Backlog. Preserve facts, conditions, uncertainty, authority and evidence.

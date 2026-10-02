@@ -15,16 +15,26 @@ A one-fact answer is one or two sentences. Otherwise:
    An empty section shows only its label.
 
 ```
-0. **Done:** finished and checked work, with its evidence.
-1. **InProgress:** work running now, and who runs it.
-2. **Questions:** everything that needs the admin, one **Q1.** sub-item per question.
+0. **Done:**
+   - **Login fix:** merged; 213 of 214 tests pass.
+1. **InProgress:**
+   - **CI:** reruns the full suite.
+2. **Pending:**
+   - **Review:** waiting for CODEX_EXPERT.
+3. **Questions:**
    - **Q1.** Approve: deploy to production?
      - `<a>` After CI passes.
      - (b) Now.
-3. **Todos:** work in the current task done next, in order.
-4. **Pending:** work waiting for someone or something else.
-5. **Backlog:** work deferred to later or optional.
+4. **Todos:**
+   - **Payment test:** check why `payment.spec.ts:88` fails.
+5. **Backlog:**
+   - **jsonwebtoken:** update in a separate change.
 ```
+
+Write each item as a sub-item that starts with a bold key, never as plain text after the label:
+Done holds finished and checked work with its evidence; InProgress, work running now and who runs it;
+Pending, work waiting for someone or something else; Questions, everything that needs the admin;
+Todos, work in the current task done next, in order; Backlog, work deferred to later or optional.
 
 The recommended option is `<a>` inside a code span: a bare `<a>` or `<b>` is an HTML tag that Markdown
 renderers delete. Other options are (b), (c). Start an approval with "Approve:".

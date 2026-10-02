@@ -101,15 +101,19 @@ key-first bullets, then a one-sentence conclusion, then six fixed sections. A re
 
 **Conclusion:** The login fix is approved; one payment test still fails, cause not checked.
 
-0. **Done:** Login fix reviewed and merged.
-1. **InProgress:** CI reruns the full suite.
-2. **Questions:**
+0. **Done:**
+   - **Login fix:** reviewed and merged.
+1. **InProgress:**
+   - **CI:** reruns the full suite.
+2. **Pending:**
+3. **Questions:**
    - **Q1.** Approve: deploy the fix to production?
      - `<a>` After CI passes.
      - (b) Now.
-3. **Todos:** CODEX_01 checks `payment.spec.ts:88`.
-4. **Pending:**
-5. **Backlog:** Update `jsonwebtoken` in a separate change.
+4. **Todos:**
+   - **Payment test:** CODEX_01 checks `payment.spec.ts:88`.
+5. **Backlog:**
+   - **jsonwebtoken:** update in a separate change.
 
 It works in any language. Say `stop ste mode` to pause it for a session.
 
