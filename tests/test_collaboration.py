@@ -315,7 +315,7 @@ class CollaborationTests(unittest.IsolatedAsyncioTestCase):
         supervisor = Supervisor(self.store, self.generation)
         supervisor.codex = clients
         await supervisor.dispatch()
-        self.assertEqual([len(client.sent) for client in clients.values()], [10, 10])
+        self.assertEqual([len(client.sent) for client in clients.values()], [20, 20])
         for _ in range(4):
             await supervisor.dispatch()
         for name, client in clients.items():

@@ -1080,12 +1080,16 @@ raise SystemExit(exit_code)
             "review_policy": "peer_required", "reviewer": "CODEX_EXPERT"}))
         submitted = self.call("task", "submit", task["id"], "--expected-version", "1", input=json.dumps({"paths": ["result.py"], "summary": "Ready", "evidence": ["Value checked"]}))
         submission = submitted["submission"]
-        self.wait(lambda: any(e["data"].get("method") == "turn/start" for e in self.effects("codex_packet")))
-        packet = next(e["data"] for e in self.effects("codex_packet") if e["data"].get("method") == "turn/start")
+        self.wait(lambda: any(e["member"] == "CODEX_EXPERT" and e["data"].get("method") == "turn/start"
+                              for e in self.effects("codex_packet")))
+        packet = next(e["data"] for e in self.effects("codex_packet")
+                      if e["member"] == "CODEX_EXPERT" and e["data"].get("method") == "turn/start")
         self.assertIn("Source-bound review packet", packet["params"]["input"][0]["text"])
         self.assertIn(submission["id"], packet["params"]["input"][0]["text"])
-        self.wait(lambda: self.store.attempts(task["id"])["items"][0]["state"] == "completed")
-        attempt = self.store.attempts(task["id"])["items"][0]
+        self.wait(lambda: any(attempt["member"] == "CODEX_EXPERT" and attempt["state"] == "completed"
+                              for attempt in self.store.attempts(task["id"])["items"]))
+        attempt = next(attempt for attempt in self.store.attempts(task["id"])["items"]
+                       if attempt["member"] == "CODEX_EXPERT")
         self.assertTrue(attempt["turn_id"])
         self.assertEqual(attempt["output_state"], "received")
         self.assertTrue(attempt["context_digest"])

@@ -443,18 +443,20 @@ class BroadcastDispatchTests(unittest.IsolatedAsyncioTestCase):
 
         self.supervisor.codex["CODEX_01"] = BarrierClient()
         self.supervisor.codex["CODEX_EXPERT"] = BarrierClient()
-        self.store.send("CLAUDE_01", "CODEX_01", "Review the parser change")
-        self.store.send("CLAUDE_01", "CODEX_EXPERT", "Review the recovery contract")
+        with self.store.tx() as db:
+            self.store.queue(db, "CLAUDE_01", "CODEX_01", "Review the parser change")
+            self.store.queue(db, "CLAUDE_01", "CODEX_EXPERT", "Review the recovery contract")
 
         await asyncio.wait_for(self.supervisor.dispatch(), timeout=7)
 
         self.assertEqual(set(arrivals[:2]), {("CODEX_01", False), ("CODEX_EXPERT", False)})
-        self.assertEqual(len(arrivals), 4)
-        self.assertTrue(all(copied for _, copied in arrivals[2:]))
-        self.assertEqual(self.store.status()["message_counts"].get("accepted"), 4)
+        self.assertEqual(len(arrivals), 2)
+        self.assertTrue(all(not copied for _, copied in arrivals))
+        self.assertEqual(self.store.status()["message_counts"].get("accepted"), 2)
 
-    async def test_direct_queue_finishes_before_any_fyi_copy_starts(self):
+    async def test_fyi_copy_starts_while_another_recipients_direct_send_is_blocked(self):
         direct_started = asyncio.Event()
+        fyi_started = asyncio.Event()
         release_direct = asyncio.Event()
 
         class HeldClient(FakeClient):
@@ -465,19 +467,45 @@ class BroadcastDispatchTests(unittest.IsolatedAsyncioTestCase):
                 self.turn_id = self.last_sent_turn_id = "fixture-turn"
                 return "accepted"
 
+        class CopyClient(FakeClient):
+            async def send(self, message):
+                self.sent.append(message)
+                fyi_started.set()
+                self.turn_id = self.last_sent_turn_id = "fixture-turn"
+                return "accepted"
+
         held = HeldClient()
         self.supervisor.codex["CODEX_01"] = held
+        copy_client = CopyClient()
+        self.supervisor.codex["CODEX_EXPERT"] = copy_client
         self.store.send("CLAUDE_01", "CODEX_01", "Do the requested review")
         dispatch = asyncio.create_task(self.supervisor.dispatch())
         try:
             await asyncio.wait_for(direct_started.wait(), timeout=0.5)
-            self.assertEqual(self.claude_sent, [])
-            self.assertEqual(self.clients["CODEX_EXPERT"].sent, [])
+            await asyncio.wait_for(fyi_started.wait(), timeout=0.5)
         finally:
             release_direct.set()
         await asyncio.wait_for(dispatch, timeout=1)
+        self.assertEqual(len(copy_client.sent), 1)
         self.assertEqual(len(self.claude_sent), 1)
-        self.assertEqual(len(self.clients["CODEX_EXPERT"].sent), 1)
+
+    async def test_one_recipients_direct_backlog_does_not_spend_other_recipients_budget(self):
+        self.store.member("CLAUDE_EXPERT", {"status": "stopped"})
+        with self.store.tx() as db:
+            for index in range(20):
+                self.store.queue(db, "CLAUDE_01", "CODEX_01", f"Direct backlog {index}")
+        source = self.store.send("CLAUDE_01", "CODEX_01", "Notify the full room")
+
+        await self.supervisor.dispatch()
+
+        self.assertEqual(len(self.clients["CODEX_01"].sent), 20)
+        copies = [message for message in self.clients["CODEX_EXPERT"].sent
+                  if json.loads(message["context"]).get("broadcast", {}).get("id") == source["id"]]
+        self.assertEqual(len(copies), 1)
+        with self.store.read() as db:
+            copy = db.execute("SELECT status FROM messages WHERE id=? AND recipient='CODEX_EXPERT'",
+                              (copies[0]["id"],)).fetchone()
+        self.assertEqual(copy["status"], "accepted")
 
     async def test_recipient_queues_keep_fifo_and_never_overlap_native_sends(self):
         class TrackingClient(FakeClient):

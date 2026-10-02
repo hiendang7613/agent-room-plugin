@@ -2,7 +2,6 @@
 
 import asyncio
 import hashlib
-from itertools import zip_longest
 import json
 import os
 from pathlib import Path
@@ -332,40 +331,34 @@ class Supervisor:
     async def dispatch(self):
         room = self.store.room()
         paused = {"waiting_permission", "waiting_native_input", "failed", "stopped"}
+        queues = {}
         with self.store.read() as db:
-            direct_queues, broadcast_queues = [], []
             for name in MODES[room["mode"]]:
                 member = json.loads(db.execute("SELECT data FROM members WHERE name=?", (name,)).fetchone()[0])
                 if member["status"] not in paused:
-                    direct_queues.append([dict(row) for row in db.execute(
+                    direct = [dict(row) for row in db.execute(
                         "SELECT * FROM messages WHERE status='queued' AND recipient=? "
-                        "AND json_extract(context,'$.broadcast.id') IS NULL ORDER BY seq LIMIT 20", (name,))])
-                    broadcast_queues.append([dict(row) for row in db.execute(
+                        "AND json_extract(context,'$.broadcast.id') IS NULL ORDER BY seq LIMIT 20", (name,))]
+                    fyis = [dict(row) for row in db.execute(
                         "SELECT * FROM messages WHERE status='queued' AND recipient=? "
-                        "AND json_extract(context,'$.broadcast.id') IS NOT NULL ORDER BY seq LIMIT 20", (name,))])
-            # Keep direct requests ahead of FYI traffic, alternate recipients, and retain FIFO per inbox.
-            direct = [message for batch in zip_longest(*direct_queues) for message in batch if message is not None][:20]
-            remaining = 20 - len(direct)
-            fyis = [message for batch in zip_longest(*broadcast_queues) for message in batch if message is not None][:remaining]
-        # Native sends to different member sessions start independently. Keep
-        # each inbox serial and direct-before-FYI; a long recipient backlog can
-        # still hold up the phase barrier below.
-        for phase in (direct, fyis):
-            queues = {}
-            for message in phase:
-                target = message["recipient"]
-                if target in MODES[room["mode"]]:
-                    queues.setdefault(target, []).append(message)
-            outcomes = await asyncio.gather(
-                *(self._dispatch_member_queue(target, queue, paused) for target, queue in queues.items()),
-                return_exceptions=True,
-            )
-            # Wait for every recipient in this phase before surfacing an
-            # unexpected failure. Other members may already have side effects;
-            # unfinished dispatch attempts remain recoverable as unknown.
-            for outcome in outcomes:
-                if isinstance(outcome, BaseException):
-                    raise outcome
+                        "AND json_extract(context,'$.broadcast.id') IS NOT NULL ORDER BY seq LIMIT 20", (name,))]
+                    # Bound work per inbox. Direct work gets that recipient's
+                    # first slots; one busy inbox cannot consume another's FYI allowance.
+                    queues[name] = (direct + fyis)[:20]
+        queues = {target: messages for target, messages in queues.items() if messages}
+
+        # Keep direct priority and FIFO within each delivery class, but start
+        # every selected recipient queue together. A slow direct recipient
+        # cannot hold other members' FYI notifications behind a phase barrier.
+        outcomes = await asyncio.gather(
+            *(self._dispatch_member_queue(target, queue, paused) for target, queue in queues.items()),
+            return_exceptions=True,
+        )
+        # Wait for every selected recipient queue before surfacing an
+        # unexpected failure; unfinished attempts remain recoverable as unknown.
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
 
     async def _dispatch_member_queue(self, target, messages, paused):
         """Dispatch one recipient's ordered queue without overlapping its native turns."""
