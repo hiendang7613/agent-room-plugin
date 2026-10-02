@@ -813,9 +813,24 @@ raise SystemExit(exit_code)
         already_running = self.call("start", "--mode", "default")
         self.assertFalse(already_running["started"])
         self.assertEqual(already_running["reason"], "supervisor already running")
-        self.call("send", "--to", "CLAUDE_EXPERT", input="Review the shared contract")
-        self.wait(lambda: self.effects("claude_inbox"))
-        self.assertEqual(self.effects("claude_inbox")[-1]["member"], "CLAUDE_EXPERT")
+        prior_copy = self.call("send", "--to", "CODEX_EXPERT", input="A prior copy for the Claude expert")
+        prior_copy_notice = next(message for message in self.store.inbox("CLAUDE_EXPERT")["items"]
+                                 if message["context"].get("broadcast", {}).get("id") == prior_copy["id"])
+        self.wait(lambda: any(effect["member"] == "CLAUDE_EXPERT" and
+                              effect["data"].get("msg_id") == prior_copy_notice["id"]
+                              for effect in self.effects("claude_inbox")))
+        sent = self.call("send", "--to", "CLAUDE_EXPERT", input="Review the shared contract")
+        # A prior FYI copy is already in this inbox; identify the direct message under test by ID.
+        self.wait(lambda: any(effect["member"] == "CLAUDE_EXPERT" and
+                              effect["data"].get("msg_id") == sent["id"]
+                              for effect in self.effects("claude_inbox")))
+        packet = next(effect for effect in self.effects("claude_inbox")
+                      if effect["member"] == "CLAUDE_EXPERT" and
+                      effect["data"].get("msg_id") == sent["id"])
+        self.assertEqual(packet["data"]["from"], "CLAUDE_01")
+        content = packet["data"]["message"]["content"]
+        self.assertIn("Agent Room peer event", content)
+        self.assertNotIn("Agent Room peer broadcast", content)
         self.call("stop")
         self.assertTrue(all(not process_alive(m["pid"], m["stamp"]) for m in workers))
         original = self.store.member("CLAUDE_EXPERT")["native_id"]
