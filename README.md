@@ -1,3 +1,8 @@
+> **Moved.** This project continues as **ihav-agent-room** at https://github.com/hiendang7613/ihav-agent-room.
+> This repository is archived and read-only. Install the new plugin instead:
+> `claude plugin marketplace add hiendang7613/ihav-agent-room` then
+> `claude plugin install ihav-agent-room@ihav-agent-room-marketplace`.
+
 <h1 align="center">Agent Room</h1>
 
 <p align="center">
