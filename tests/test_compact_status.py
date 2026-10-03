@@ -13,6 +13,8 @@ from agent_room.evidence import source_matches
 from test_evidence import EvidenceFixture
 from receipts import human_receipt
 
+os.environ.pop("CLAUDE_EFFORT", None)  # Hermetic: the host session effort must not leak into room state.
+
 
 class CompactStatusTests(EvidenceFixture, unittest.TestCase):
     def test_compact_checks_current_source_without_rechecking_closed_reviews(self):
@@ -197,7 +199,8 @@ class CompactStatusTests(EvidenceFixture, unittest.TestCase):
         for key in ("unaccounted_prompts", "approvals", "claims", "attention", "pending_inboxes", "room"):
             self.assertEqual(compact[key], full[key], key)
         model_fields = {"requested_model", "requested_effort", "model_label", "settings_application",
-                        "observed_model", "observed_effort", "model_observation_source", "model_observed_at"}
+                        "observed_model", "observed_effort", "model_observation_source", "model_observed_at",
+                        "effort_source", "effort_observed_at", "settings_pending_restart"}
         compact_members = [{key: value for key, value in member.items() if key not in model_fields}
                            for member in full["members"]]
         self.assertEqual(compact["members"], compact_members)

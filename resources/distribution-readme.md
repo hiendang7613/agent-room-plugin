@@ -4,7 +4,8 @@ A native Claude Code + Codex team for this project. Describe the outcome in ordi
 CLAUDE_01 operates room coordination and reports useful progress, results and necessary decisions.
 Members can ask, brainstorm, challenge, help and share experience directly within existing authority.
 
-**Version 0.3.24, schema 3.** Each member gets up to 20 direct messages and up to 20 FYI copies (peer broadcasts
+**Version 0.3.25, schema 3.** New rooms start in pair mode (CLAUDE_WORKER + CODEX_WORKER); `/agent-room:mode advisors`
+gives the four-member room, and `/agent-room:effort` sets member effort. 0.3.24 gave each member up to 20 direct messages and up to 20 FYI copies (peer broadcasts
 and admin relays) per dispatch pass, so neither class starves the other. 0.3.23 gave each member its own allowance
 and the three-zone admin reply shape. 0.3.22 sent queued messages to different
 members concurrently (each member's inbox stays in order). 0.3.21 added the admin's eight-section reply shape and installs
@@ -27,14 +28,15 @@ the native CLIs, then extract this archive to a stable directory. In Claude Code
 Reopen Claude Code in the project, then:
 
 ```text
-/init-agents-space
+/agent-room:init
 ```
 
-Every new room has four members: CLAUDE_01, CODEX_01, CLAUDE_EXPERT, CODEX_EXPERT. `--mode full`
-remains a compatibility alias for the same roster. Every room message queues a copy for the other
+New rooms start in `pair` mode with 2 members: CLAUDE_WORKER (CLAUDE_01, your session) and CODEX_WORKER
+(CODEX_01). Run `/agent-room:mode advisors` for the four-member room with CLAUDE_EXPERT and CODEX_EXPERT.
+Existing rooms in the legacy modes `default` or `full` keep four members. Every room message queues a copy for the other
 members; broadcast copies are FYI, and only the direct addressee owns the request/task. The supervisor
 tries delivery as soon as its queue is available. A stopped/paused member keeps its queued messages.
-If the bare alias conflicts with an existing skill, use `/agent-room:init-agents-space`. Existing
+The older name `/init-agents-space` still works. Existing
 project files and custom room guides are preserved.
 
 Continue talking to main: give a goal, ask for a simpler approach, request status or say "continue".
@@ -47,14 +49,16 @@ native host requires one. This guidance does not guarantee agent compliance or t
 
 ```text
 /agent-room:status
+/agent-room:mode
+/agent-room:effort
 /agent-room:stop
 /agent-room:start
 /agent-room:doctor
 ```
 
 Status/doctor are read-only. Stop preserves unfinished work; manual stop persists until start.
-Reopening main may resume the saved native sessions. Changes to mode require stop and explicit
-handoff of affected open tasks. No silent replacement session or team expansion is permitted.
+Reopening main may resume the saved native sessions. A mode change needs explicit handoff of the
+leaving members' open tasks; a running room restarts its workers on their exact sessions. No silent replacement session or team expansion is permitted.
 
 ## Agent/operator references
 
@@ -76,4 +80,4 @@ python3 bin/agent-room --json verify-package /path/to/agent-room.zip
 ```
 
 The verifier checks archive structure and hashes, not publisher authenticity. Default CLI contracts,
-schema, native permissions and model loops are unchanged in 0.3.24.
+schema, native permissions and model loops are unchanged in 0.3.25.

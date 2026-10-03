@@ -356,7 +356,15 @@ async def start_claude(project, native_id, resume, env, log, member=LAUNCHED_CLA
     settings = Path(log).with_suffix(".settings.json")
     bindings = {key: value for key, value in env.items()
                 if key.startswith("AGENT_ROOM_") or key == "CLAUDE_CODE_DISABLE_BG_EXIT_HANDOFF"}
-    atomic_write(settings, json.dumps({"env": bindings, "worktree": {"bgIsolation": "none"}}), mode=0o600)
+    native_settings = {"env": bindings, "worktree": {"bgIsolation": "none"}}
+    # Exact resume reloads this file, so the current requested model and effort travel here as well as in flags.
+    if model:
+        native_settings["model"] = model
+    if effort:
+        if effort not in {"low", "medium", "high", "xhigh", "max"}:
+            raise RoomError("Unsupported Claude effort setting", "configuration")
+        native_settings["effortLevel"] = effort
+    atomic_write(settings, json.dumps(native_settings), mode=0o600)
     if resume:
         # Re-supplying saved launch options makes native Claude fork a copy.
         # It reloads the original settings file (updated above) on exact resume.

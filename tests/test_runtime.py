@@ -117,11 +117,13 @@ class RuntimeTests(unittest.TestCase):
         self.env = dict(os.environ, PATH=str(fake_bin) + os.pathsep + os.environ["PATH"],
             FAKE_NATIVE_ROOT=str(self.root / "native"), CLAUDE_CONFIG_DIR=str(self.root / "claude-config"),
             AGENT_ROOM_MEMBER="CLAUDE_01", AGENT_ROOM_SESSION_ID=self.session)
+        self.env.pop("CLAUDE_EFFORT", None)  # Hermetic: the host's own effort must not leak into room state.
         self.main_process = subprocess.Popen([sys.executable, str(FIXTURE), "--daemon", self.session, str(self.project)],
             env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         self.addCleanup(self.cleanup_runtime)
         self.wait(lambda: (self.root / "native" / (self.session + ".agent.json")).exists())
-        self.call("init", "--no-start")
+        # These runtime tests exercise the four-member room; new rooms default to pair (tested separately).
+        self.call("init", "--no-start", "--mode", "default")
         self.store = Store(self.project)
 
     def wait(self, predicate, timeout=15):
@@ -883,6 +885,54 @@ raise SystemExit(exit_code)
         self.call("intake", "account", pending[0]["id"], "--disposition", "Captured implementation and research separately")
         self.assertEqual(self.call("hook", input=json.dumps(payload)), {})
         self.assertEqual(self.store.room()["status"], "running")
+
+    def codex_turns(self, member):
+        return [effect["data"]["params"] for effect in self.effects("codex_packet")
+                if effect["member"] == member and effect["data"].get("method") == "turn/start"]
+
+    def test_mode_switch_while_running_restarts_exact_sessions_with_new_settings(self):
+        self.start("default")
+        before = {name: self.store.member(name)["native_id"] for name in ("CODEX_01", "CLAUDE_EXPERT", "CODEX_EXPERT")}
+        generation = self.store.room()["generation"]
+        switched = self.call("mode", "pair")
+        self.assertEqual((switched["mode"], switched["restarting"]), ("pair", True))
+        self.wait(lambda: self.store.room()["generation"] != generation and self.store.room()["status"] == "running")
+        self.wait(lambda: all(self.store.member(name)["status"] == "stopped" for name in ("CLAUDE_EXPERT", "CODEX_EXPERT")))
+        self.assertEqual(self.store.member("CODEX_01")["native_id"], before["CODEX_01"])
+        resumes = [effect["data"]["params"] for effect in self.effects("codex_packet")
+                   if effect["member"] == "CODEX_01" and effect["data"].get("method") == "thread/resume"]
+        self.assertEqual(resumes[-1]["model"], "gpt-6.1-sol")
+        self.call("send", "--to", "CODEX_01", "--body", "pair mode turn")
+        self.wait(lambda: any(turn.get("model") == "gpt-6.1-sol" for turn in self.codex_turns("CODEX_01")))
+        self.assertEqual(self.codex_turns("CODEX_01")[-1]["effort"], "medium")
+        generation = self.store.room()["generation"]
+        self.call("mode", "advisors")
+        self.wait(lambda: self.store.room()["generation"] != generation and self.store.room()["status"] == "running")
+        self.wait(lambda: all(self.store.member(name)["status"] in {"idle", "running"} for name in ("CLAUDE_EXPERT", "CODEX_EXPERT")))
+        self.assertEqual({name: self.store.member(name)["native_id"] for name in before}, before)
+        resumed = [effect["data"] for effect in self.effects("claude_start") if effect["member"] == "CLAUDE_EXPERT"][-1]
+        self.assertEqual((resumed["resume"], resumed["model"], resumed["effort"]), (True, None, None))
+        settings = json.loads((self.store.runtime / "CLAUDE_EXPERT.settings.json").read_text())
+        self.assertEqual((settings["model"], settings["effortLevel"]), ("opus", "xhigh"))
+
+    def test_gateway_effort_change_reaches_the_next_codex_turn_and_clears_overrides(self):
+        self.start()
+        self.call("effort", "high", "--member", "CODEX_EXPERT")
+        refused = self.call("effort", "low", env=dict(self.env, AGENT_ROOM_MEMBER="CODEX_01"), ok=False)
+        self.assertEqual(refused["error"]["code"], "authority")
+        # The first observed session effort is a baseline; the next different level is a change everyone follows.
+        self.call("hook", input=json.dumps({"hook_event_name": "UserPromptSubmit", "cwd": str(self.project),
+                  "session_id": self.session, "prompt": "Start", "effort": {"level": "medium"}}))
+        baseline = {member["name"]: member for member in self.call("effort")["members"]}
+        self.assertEqual(baseline["CODEX_EXPERT"]["requested_effort"], "high")
+        self.call("hook", input=json.dumps({"hook_event_name": "UserPromptSubmit", "cwd": str(self.project),
+                  "session_id": self.session, "prompt": "Keep going", "effort": {"level": "low"}}))
+        report = {member["name"]: member for member in self.call("effort")["members"]}
+        self.assertEqual((report["CODEX_EXPERT"]["requested_effort"], report["CODEX_EXPERT"]["source"]), ("low", "gateway"))
+        self.assertTrue(report["CLAUDE_EXPERT"]["pending_restart"])
+        self.assertEqual(report["CLAUDE_01"]["observed_effort"], "low")
+        self.call("send", "--to", "CODEX_EXPERT", "--body", "turn after sync")
+        self.wait(lambda: any(turn.get("effort") == "low" for turn in self.codex_turns("CODEX_EXPERT")))
 
     def test_peer_user_prompt_hook_never_creates_admin_authority(self):
         self.start()

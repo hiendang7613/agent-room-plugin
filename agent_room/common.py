@@ -12,12 +12,12 @@ import subprocess
 import tempfile
 import uuid
 
-from agent_room.roster import DEFAULT_MEMBERS, GATEWAY, MEMBERS as ROSTER_MEMBERS, canonical_member
+from agent_room.roster import GATEWAY, MEMBERS as ROSTER_MEMBERS, MODE_MEMBERS, canonical_member
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
-MODES = {"default": DEFAULT_MEMBERS, "full": ROSTER_MEMBERS}
-MEMBERS = MODES["full"]
+MODES = dict(MODE_MEMBERS)
+MEMBERS = ROSTER_MEMBERS
 
 
 def acting_member(default=GATEWAY):

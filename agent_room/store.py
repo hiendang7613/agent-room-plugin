@@ -12,7 +12,7 @@ from agent_room.common import (GATEWAY, MEMBERS, MODES, RoomError, acting_member
                                file_lock, fingerprint, native_event_prompt, now, overlaps, scoped_path, uid)
 from agent_room.evidence import bounded, capture, digest, matches_terms, nonempty_strings, source_matches
 from agent_room.provenance import assess_chain
-from agent_room.roster import ROSTER_BY_NAME
+from agent_room.roster import EFFORT_LEVELS, ROSTER_BY_NAME, mode_settings
 from agent_room.schema import EXTENSIONS, KNOWLEDGE_SCHEMA, VERSION
 
 
@@ -80,7 +80,7 @@ class Store:
 
     def connect(self):
         if not self.exists():
-            raise RoomError("Room is not initialized. Run /init-agents-space.", "not_initialized")
+            raise RoomError("Room is not initialized. Run /agent-room:init.", "not_initialized")
         connection = sqlite3.connect(self.path, timeout=10, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
@@ -134,11 +134,12 @@ class Store:
                 db.execute("INSERT INTO meta VALUES ('room', ?)", (dumps(room),))
                 for name in MEMBERS:
                     profile = ROSTER_BY_NAME[name]
+                    settings = mode_settings(mode, name)
                     db.execute("INSERT INTO members VALUES (?,?)", (name, dumps({
                         "name": name, "native_id": None, "pid": None, "stamp": None,
                         "status": "stopped", "error": None, "turn_id": None,
-                        "requested_model": profile["model"], "requested_effort": profile["effort"],
-                        "model_label": profile["label"],
+                        "requested_model": settings["model"], "requested_effort": settings["effort"],
+                        "model_label": settings["label"], "effort_source": "mode",
                         "settings_application": "host-managed" if profile["control"] == "host" else "configured; not started",
                         "observed_model": None, "observed_effort": None, "model_observed_at": None,
                     })))
@@ -150,6 +151,100 @@ class Store:
                 db.close()
                 temporary.unlink(missing_ok=True)
             return room
+
+    def apply_mode_settings(self, db, mode):
+        """Reset every member's requested model/effort to the mode's settings; manual overrides are cleared."""
+        for name in MEMBERS:
+            member = json.loads(db.execute("SELECT data FROM members WHERE name=?", (name,)).fetchone()[0])
+            settings = mode_settings(mode, name)
+            member.update(requested_model=settings["model"], requested_effort=settings["effort"],
+                          model_label=settings["label"], effort_source="mode")
+            if ROSTER_BY_NAME[name]["host"] == "claude" and name != GATEWAY and member.get("native_id"):
+                member["settings_pending_restart"] = True
+            db.execute("UPDATE members SET data=? WHERE name=?", (dumps(member), name))
+
+    def set_effort(self, level, member=None, clear=False):
+        """Set requested effort for one member (an override) or every room-controlled member; clear restores the mode."""
+        if not clear and level not in EFFORT_LEVELS:
+            raise RoomError("Effort must be one of: " + ", ".join(EFFORT_LEVELS))
+        with self.tx() as db:
+            room = self.get_room(db)
+            names = [canonical_member(member)] if member else [name for name in MEMBERS if name != GATEWAY]
+            for name in names:
+                if name not in MEMBERS:
+                    raise RoomError("Unknown member")
+                if name == GATEWAY:
+                    raise RoomError("The gateway is your own session; change it with /effort in Claude Code", "authority")
+                data = json.loads(db.execute("SELECT data FROM members WHERE name=?", (name,)).fetchone()[0])
+                if clear:
+                    data.update(requested_effort=mode_settings(room["mode"], name)["effort"], effort_source="mode")
+                else:
+                    data.update(requested_effort=level, effort_source="override")
+                if ROSTER_BY_NAME[name]["host"] == "claude" and data.get("native_id"):
+                    data["settings_pending_restart"] = True
+                db.execute("UPDATE members SET data=? WHERE name=?", (dumps(data), name))
+            self.event(db, "settings.effort", {"members": names, "effort": None if clear else level, "clear": clear})
+        return self.effort_report()
+
+    def sync_gateway_effort(self, level):
+        """Admin decision Q3.b: when the gateway's own effort changes, every room-controlled member follows it and
+        manual overrides are cleared. Codex members apply it on their next turn; running Claude workers on resume."""
+        if level not in EFFORT_LEVELS:
+            return False
+        with self.tx() as db:
+            room = self.get_room(db)
+            gateway = json.loads(db.execute("SELECT data FROM members WHERE name=?", (GATEWAY,)).fetchone()[0])
+            gateway.update(observed_effort=level, effort_observed_at=now())
+            db.execute("UPDATE members SET data=? WHERE name=?", (dumps(gateway), GATEWAY))
+            if room.get("synced_effort") == level:
+                return False
+            baseline = room.get("synced_effort") is None
+            room["synced_effort"] = level
+            if baseline:
+                # The first observation is the starting point, not a change: mode settings stay as configured.
+                self.put_room(db, room)
+                self.event(db, "settings.effort_baseline", {"effort": level})
+                return False
+            self.put_room(db, room)
+            for name in MEMBERS:
+                if name == GATEWAY:
+                    continue
+                data = json.loads(db.execute("SELECT data FROM members WHERE name=?", (name,)).fetchone()[0])
+                data.update(requested_effort=level, effort_source="gateway")
+                if ROSTER_BY_NAME[name]["host"] == "claude" and data.get("native_id"):
+                    data["settings_pending_restart"] = True
+                db.execute("UPDATE members SET data=? WHERE name=?", (dumps(data), name))
+            self.event(db, "settings.effort_sync", {"effort": level})
+            return True
+
+    def effort_report(self):
+        with self.read() as db:
+            room = self.get_room(db)
+            members = []
+            for name in MEMBERS:
+                data = json.loads(db.execute("SELECT data FROM members WHERE name=?", (name,)).fetchone()[0])
+                members.append({"name": name, "in_mode": name in MODES[room["mode"]],
+                                "requested_effort": data.get("requested_effort"),
+                                "source": "your own session (host-managed)" if name == GATEWAY else data.get("effort_source", "mode"),
+                                "observed_effort": data.get("observed_effort"),
+                                "pending_restart": bool(data.get("settings_pending_restart"))})
+            return {"mode": room["mode"], "synced_effort": room.get("synced_effort"), "members": members,
+                    "note": "Requested settings, not proof the host applied them."}
+
+    def gateway_settings_warning(self, room, gateway):
+        """Admin decision R1.a: warn when the gateway's observed model or effort differs from the mode's setting."""
+        wanted = mode_settings(room["mode"], GATEWAY)
+        hints = []
+        observed_model = (gateway.get("observed_model") or "").lower()
+        if observed_model and wanted["model"] not in observed_model:
+            hints.append(f"/model {wanted['model']}")
+        if gateway.get("observed_effort") and gateway["observed_effort"] != wanted["effort"]:
+            hints.append(f"/effort {wanted['effort']}")
+        if not hints:
+            return None
+        return (f"Your session runs {gateway.get('observed_model') or 'an unknown model'} at "
+                f"{gateway.get('observed_effort') or 'unknown'} effort; mode {room['mode']} expects "
+                f"{wanted['label']} at {wanted['effort']}. Run " + " and ".join(hints) + ".")
 
     @staticmethod
     def get_room(db):
@@ -1401,9 +1496,10 @@ class Store:
             for row in db.execute("SELECT data FROM members"):
                 member = json.loads(row[0])
                 profile = ROSTER_BY_NAME[member["name"]]
-                member.setdefault("requested_model", profile["model"])
-                member.setdefault("requested_effort", profile["effort"])
-                member.setdefault("model_label", profile["label"])
+                settings = mode_settings(room["mode"], member["name"])
+                member.setdefault("requested_model", settings["model"])
+                member.setdefault("requested_effort", settings["effort"])
+                member.setdefault("model_label", settings["label"])
                 member.setdefault("observed_model", None)
                 member.setdefault("observed_effort", None)
                 member.setdefault("model_observed_at", None)
@@ -1412,8 +1508,10 @@ class Store:
                     "existing session; settings application unknown" if member.get("native_id") else
                     "configured; not started"))
                 members.append(member)
+            gateway = next(member for member in members if member["name"] == GATEWAY)
             result = {"room": room,
                     "members": members,
+
                     "tasks": tasks,
                     "attention": self._attention(db, tasks),
                     "pending_inboxes": {
@@ -1435,6 +1533,9 @@ class Store:
                     "claims": [dict(r) for r in db.execute("SELECT * FROM claims")],
                     "approvals": [json.loads(r[0]) for r in db.execute("SELECT data FROM approvals")],
                     "attempt_counts": dict(attempt_counts), "message_counts": dict(message_counts)}
+            warning = self.gateway_settings_warning(room, gateway)
+            if warning:
+                result["gateway_settings_warning"] = warning
             return self._compact_status(result) if compact else result
 
     @staticmethod
@@ -1458,7 +1559,8 @@ class Store:
             status["tasks"].append(item)
         status["notes"] = [Store._note_preview(note) for note in notes if note["state"] in {"open", "approved"}]
         model_fields = ("requested_model", "requested_effort", "model_label", "settings_application",
-                        "observed_model", "observed_effort", "model_observation_source", "model_observed_at")
+                        "observed_model", "observed_effort", "model_observation_source", "model_observed_at",
+                        "effort_source", "effort_observed_at", "settings_pending_restart")
         for member in status["members"]:
             for field in model_fields:
                 member.pop(field, None)

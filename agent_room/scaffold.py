@@ -59,7 +59,7 @@ def initialize(project, mode=None):
         prepared = {path: managed_content(path, body) for path, body in files.items()}
         room = store.initialize(mode or "default")
         if mode and mode != room["mode"]:
-            raise RoomError("Existing room keeps its mode. Use stop, handoff and start --mode to change it.", "conflict")
+            raise RoomError("Existing room keeps its mode. Use agent-room mode pair|advisors to change it.", "conflict")
         for path, content in prepared.items():
             if not path.exists() or path.read_bytes().decode("utf-8") != content:
                 atomic_write(path, content, path.stat().st_mode & 0o777 if path.exists() else 0o644)

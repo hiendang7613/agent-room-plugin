@@ -25,7 +25,7 @@ def build(output, source=PLUGIN_ROOT):
                 raise RoomError(f"Package source must be a regular in-project file: {path}", "conflict")
             selected[path.relative_to(source).as_posix()] = path.read_bytes()
     required = {"bin/agent-room", "agent_room/cli.py", "hooks/hooks.json", "resources/init-alias.md",
-                "skills/init-agents-space/SKILL.md", "templates/README.md", ".claude-plugin/plugin.json",
+                "skills/init/SKILL.md", "skills/init-agents-space/SKILL.md", "templates/README.md", ".claude-plugin/plugin.json",
                 ".claude-plugin/marketplace.json", "docs/v1.1.md", "resources/distribution-readme.md",
                 "agent_room/guides.py", *GUIDES.values(),
                 "resources/collaboration-guidance.md", "agent_room/knowledge.py", "agent_room/package_verifier.py"}

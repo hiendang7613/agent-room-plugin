@@ -1,6 +1,6 @@
 {
   "name": "agent-room",
-  "version": "0.3.24",
+  "version": "0.3.25",
   "description": "Persistent Claude Code and Codex rooms with shared tasks, peer messaging and native session recovery.",
   "author": {
     "name": "Vulcan Labs"

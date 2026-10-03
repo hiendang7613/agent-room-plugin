@@ -29,6 +29,34 @@ def canonical_member(name):
     return ALIASES.get(name, name)
 
 
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+# Room modes (admin decision 2026-10-03): `pair` is the default for new rooms (it supersedes DEC-021's four-member
+# default for new rooms only); `advisors` is the four-member room. The stored legacy modes `default` and `full` keep
+# all four members and the advisors settings, so existing rooms do not change silently.
+MODE_MEMBERS = {
+    "pair": ("CLAUDE_01", "CODEX_01"),
+    "advisors": MEMBERS,
+    "default": DEFAULT_MEMBERS,
+    "full": MEMBERS,
+}
+NEW_ROOM_MODE = "pair"
+SELECTABLE_MODES = ("pair", "advisors")
+MODE_SETTINGS = {
+    "pair": {"CLAUDE_01": {"model": "opus", "effort": "medium", "label": "Opus 5.5"},
+             "CODEX_01": {"model": "gpt-6.1-sol", "effort": "medium", "label": "Sol 6.1"}},
+    "advisors": {member["name"]: {"model": member["model"], "effort": member["effort"], "label": member["label"]}
+                 for member in ROSTER},
+}
+LEGACY_MODE_SETTINGS = {"default": "advisors", "full": "advisors"}
+
+
+def mode_settings(mode, name):
+    """Requested model/effort for one member in one mode. The gateway's values are advice; the host applies them."""
+    settings = MODE_SETTINGS[LEGACY_MODE_SETTINGS.get(mode, mode)]
+    name = canonical_member(name)
+    return dict(settings.get(name) or MODE_SETTINGS["advisors"][name])
+
+
 def launch_config(name):
     """Native model settings for spawned members; the existing gateway remains host-managed."""
     member = ROSTER_BY_NAME.get(canonical_member(name))

@@ -16,7 +16,7 @@ from agent_room.common import (GATEWAY, MEMBERS, MODES, acting_member, PLUGIN_RO
 from agent_room.native import (CodexClient, claude_agents, doctor, exact_claude,
                                owned_descendants, send_claude, start_claude, stop_claude_worker,
                                stop_descendants, wait_for_exit)
-from agent_room.roster import ROSTER_BY_NAME, launch_config
+from agent_room.roster import ROSTER_BY_NAME, SELECTABLE_MODES, launch_config
 from agent_room.store import FYI_CONTEXT_SQL, Store
 
 
@@ -68,12 +68,8 @@ def start_room(store, session, mode=None, permission_mode="default", automatic=F
             if target_mode != room["mode"]:
                 if room["status"] not in {"stopped", "failed"}:
                     raise RoomError("Stop and reconcile the room before changing mode", "conflict")
-                for row in db.execute("SELECT data FROM tasks"):
-                    task = json.loads(row[0])
-                    if task["owner"] not in MODES[target_mode] and task["state"] not in {"done", "cancelled"}:
-                        raise RoomError("Hand off open tasks of members being disabled before changing mode", "conflict", task=task["id"])
-                    if task.get("reviewer") and task["reviewer"] not in MODES[target_mode] and task["state"] not in {"done", "cancelled"}:
-                        raise RoomError("Reassign pending reviewers before disabling their member", "conflict", task=task["id"])
+                check_mode_handoff(db, target_mode)
+                store.apply_mode_settings(db, target_mode)
             generation = uid()
             room.update(mode=target_mode, status="starting", generation=generation, manual_stop=False, restart_requested=False, error=None)
             store.put_room(db, room)
@@ -98,6 +94,45 @@ def start_room(store, session, mode=None, permission_mode="default", automatic=F
                     store.put_room(db, room)
         return {"started": True, "status": "starting", "generation": generation,
                 "note": "Launch requested. status reports native readiness; this is not a model-response receipt."}
+
+
+def requested_config(member, name):
+    """The member's current requested settings (mode, override or gateway sync), else the roster default."""
+    default = launch_config(name) or {}
+    return {"model": member.get("requested_model") or default.get("model"),
+            "effort": member.get("requested_effort") or default.get("effort")}
+
+
+def check_mode_handoff(db, target_mode):
+    for row in db.execute("SELECT data FROM tasks"):
+        task = json.loads(row[0])
+        if task["owner"] not in MODES[target_mode] and task["state"] not in {"done", "cancelled"}:
+            raise RoomError("Hand off open tasks of members being disabled before changing mode", "conflict", task=task["id"])
+        if task.get("reviewer") and task["reviewer"] not in MODES[target_mode] and task["state"] not in {"done", "cancelled"}:
+            raise RoomError("Reassign pending reviewers before disabling their member", "conflict", task=task["id"])
+
+
+def change_mode(store, mode):
+    """Switch room mode now (admin decision Q2.a). A running room restarts its native workers on their exact
+    sessions with the new settings; queued messages stay queued. Members leaving the mode stop; joining ones start."""
+    if mode not in SELECTABLE_MODES:
+        raise RoomError("Mode must be pair or advisors")
+    with file_lock(store.runtime / "control.lock"):
+        with store.tx() as db:
+            room = store.get_room(db)
+            previous = room["mode"]
+            check_mode_handoff(db, mode)
+            room["mode"] = mode
+            store.apply_mode_settings(db, mode)
+            supervisor = room.get("supervisor") or {}
+            restart = room["status"] in {"starting", "running"} and process_alive(supervisor.get("pid"), supervisor.get("stamp"))
+            if restart:
+                room.update(status="stopping", restart_requested=True, manual_stop=False)
+            store.put_room(db, room)
+            store.event(db, "room.mode", {"from": previous, "to": mode, "restart": restart})
+    return {"mode": mode, "previous": previous, "members": list(MODES[mode]), "restarting": restart,
+            "note": ("Workers restart on their exact sessions with the new settings; queued messages are kept."
+                     if restart else "Applies when the room starts.")}
 
 
 def request_stop(store, manual=True, session=None):
@@ -211,8 +246,10 @@ class Supervisor:
             env = self.worker_env(name)
             self.store.member(name, {"status": "starting", "error": None, "unexpected_native_id": None})
             profile = ROSTER_BY_NAME[name]
+            config = requested_config(member, name)
             if profile["host"] == "codex":
                 client = CodexClient(self.store.project, name, env, self.store.runtime / (name + ".log"))
+                client.model_config = config
                 self.codex[name] = client  # Own cleanup even when initialization fails.
                 await client.start(member["native_id"])
                 settings_application = ("model requested at thread start; model and effort requested on new turns"
@@ -221,13 +258,11 @@ class Supervisor:
                 self.store.member(name, {"native_id": client.thread_id, "pid": client.process.pid,
                     "stamp": client.stamp, "status": "idle", "turn_id": client.turn_id,
                     "permission_class": client.permission_class,
-                    "requested_model": profile["model"],
-                    "requested_effort": profile["effort"],
+                    "settings_pending_restart": False,
                     "settings_application": settings_application})
             else:
                 native_id = member["native_id"]
                 self.claude[name] = native_id
-                config = launch_config(name)
                 try:
                     native = await start_claude(self.store.project, native_id, bool(member["native_id"]),
                                                env, self.store.runtime / (name + ".log"),
@@ -246,10 +281,10 @@ class Supervisor:
                 self.claude[name] = native["sessionId"]
                 self.store.member(name, {"native_id": native["sessionId"], "job_id": native.get("id"),
                                          "pid": native["pid"], "stamp": process_stamp(native["pid"]), "status": "idle",
-                                         "requested_model": profile["model"], "requested_effort": profile["effort"],
+                                         "settings_pending_restart": False,
                                          "settings_application": ("model and effort passed to new Claude session"
                                              if not member["native_id"] else
-                                             "resumed existing Claude session without model or effort override")})
+                                             "resumed exact session; model and effortLevel requested in its settings file")})
         self.store.wake_resumed_work(self.generation)
         with self.store.tx() as db:
             room = self.store.get_room(db)
@@ -388,6 +423,8 @@ class Supervisor:
             turn_id = None
             try:
                 if target.startswith("CODEX"):
+                    # Mode, effort override or gateway sync takes effect on the next Codex turn.
+                    self.codex[target].model_config = requested_config(member, target)
                     result = await self.codex[target].send(message)
                     turn_id = self.codex[target].last_sent_turn_id
                     self.store.member(target, {"status": "working", "turn_id": self.codex[target].turn_id})

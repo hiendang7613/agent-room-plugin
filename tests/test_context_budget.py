@@ -16,6 +16,8 @@ from agent_room.native import COLLABORATION_GUIDANCE, message_text, role_instruc
 from agent_room.store import MAX_MESSAGE_CHARS, MAX_MESSAGE_ID_BYTES, MAX_REVIEW_PACKET_BYTES
 from test_evidence import EvidenceFixture
 
+os.environ.pop("CLAUDE_EFFORT", None)  # Hermetic: the host session effort must not leak into room state.
+
 BUDGETS = {
     # 2026-10-03: +70 bytes buy the admin's three reply zones in the guidance line (also in worker instructions).
     "guidance": 1170,

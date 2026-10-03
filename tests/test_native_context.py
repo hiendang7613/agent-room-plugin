@@ -11,6 +11,8 @@ from agent_room.hooks import handle
 from agent_room.native import message_text
 from test_evidence import EvidenceFixture
 
+os.environ.pop("CLAUDE_EFFORT", None)  # Hermetic: the host session effort must not leak into room state.
+
 
 class NativeContextTests(EvidenceFixture, unittest.TestCase):
     def test_peer_envelope_parser_only_accepts_known_message_headers(self):

@@ -29,3 +29,4 @@ acknowledge messages, create tasks or start native turns.
 Use `pending_inboxes.by_member` counts internally as unprocessed conversation signals. Mention them
 when they explain a relevant wait/blocker; do not present them as proof of receipt. Use the supplied inbox command only while
 bound as that member; never retry or resend based on the count alone.
+If status has `gateway_settings_warning`, relay it with its `/model` or `/effort` hint; the room cannot change the admin's session.

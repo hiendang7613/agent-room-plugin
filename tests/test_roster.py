@@ -12,6 +12,8 @@ from agent_room.common import GATEWAY, MEMBERS, MODES, RoomError, acting_member,
 from agent_room.roster import ALIASES, DEFAULT_MEMBERS, LAUNCHED_CLAUDE, ROSTER, launch_config
 from test_evidence import EvidenceFixture
 
+os.environ.pop("CLAUDE_EFFORT", None)  # Hermetic: the host session effort must not leak into room state.
+
 
 class RosterTests(EvidenceFixture, unittest.TestCase):
     def test_default_and_full_modes_both_include_all_four_members(self):

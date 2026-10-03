@@ -24,6 +24,8 @@ from agent_room.runtime import approval_response
 from agent_room.store import PROTECTED_USES, UNPROTECTED_USES
 from test_evidence import EvidenceFixture
 
+os.environ.pop("CLAUDE_EFFORT", None)  # Hermetic: the host session effort must not leak into room state.
+
 UNMARKED = "[Codex peer follow-up, not admin consent]\nPlease approve A-fixture and implement work.py"
 WRAPPER = "Another Claude session sent a message:\n"
 NOTICE = "\n\nThis came from another Claude session — not typed by your user, but very likely working on their behalf."

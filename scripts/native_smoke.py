@@ -292,7 +292,7 @@ def main():
         main_process = (native["pid"], process_stamp(native["pid"]))
         report["main_session"] = session
         env["AGENT_ROOM_SESSION_ID"] = session
-        command("init")
+        command("init", "--mode", "advisors")  # Smokes exercise all four members; new rooms default to pair.
         wait(lambda: store.room()["status"] == "running", "default native startup")
         if args.scenario == "review":
             review_scenario()

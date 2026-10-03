@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-4F46E5"></a>
-  <img alt="Version 0.3.24" src="https://img.shields.io/badge/version-0.3.24-4F46E5">
+  <img alt="Version 0.3.25" src="https://img.shields.io/badge/version-0.3.25-4F46E5">
   <img alt="Claude Code and Codex" src="https://img.shields.io/badge/members-Claude%20Code%20%2B%20Codex-0F172A">
   <img alt="Offline tests" src="https://img.shields.io/badge/offline%20tests-364-16A34A">
   <a href="https://github.com/hiendang7613/i-have-asd-ste100"><img alt="Reports by i-have-asd-ste100" src="https://img.shields.io/badge/reports-i--have--asd--ste100-F59E0B"></a>
@@ -65,12 +65,13 @@ Restart Claude Code afterwards.
 Open your project in Claude Code and run:
 
 ```text
-/init-agents-space
+/agent-room:init
 ```
 
-The room starts four members: **CLAUDE_01**, the gateway you chat with, plus **CODEX_01**, **CLAUDE_EXPERT** and **CODEX_EXPERT**.
+New rooms start in **pair** mode with 2 members: **CLAUDE_WORKER** (CLAUDE_01, the gateway you chat with) and **CODEX_WORKER** (CODEX_01).
+Run `/agent-room:mode advisors` for the four-member room, which adds **CLAUDE_EXPERT** and **CODEX_EXPERT**. Init output says the same.
 Init creates `agents_space/` and adds managed blocks to `AGENTS.md`, `CLAUDE.md` and `.gitignore`; your own content stays.
-If the name `/init-agents-space` already belongs to another skill, use `/agent-room:init-agents-space`.
+The older name `/init-agents-space` still works.
 
 Then keep talking to CLAUDE_01 in plain words:
 
@@ -84,6 +85,9 @@ You never write JSON, look up record IDs or route messages. The gateway handles 
 
 | Command | What it does |
 |---|---|
+| `/agent-room:init` | Creates the room in pair mode, or `--mode advisors`. |
+| `/agent-room:mode` | Shows the mode, or switches between `pair` (2 members) and `advisors` (4 members) now. |
+| `/agent-room:effort` | Shows or sets member effort; when you change your own `/effort`, every member follows (the first level seen is only the starting point). |
 | `/agent-room:status` | Shows members, tasks, queues and delivery gaps. Read-only. |
 | `/agent-room:stop` | Stops the room and keeps unfinished work. |
 | `/agent-room:start` | Resumes the same native sessions. |

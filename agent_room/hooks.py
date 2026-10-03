@@ -9,10 +9,17 @@ from agent_room.common import (GATEWAY, MEMBERS, RoomError, acting_member, nativ
                                native_peer_event, native_prompt_delivery, now)
 from agent_room.native import COLLABORATION_GUIDANCE, role_instructions
 from agent_room.provenance import assess, transcript_size
-from agent_room.roster import ROSTER_BY_NAME
 from agent_room.runtime import bind_main, request_stop, start_room
 from agent_room.scaffold import install_alias
 from agent_room.store import Store
+
+
+def session_effort(payload):
+    """The host session's effort: the hook `effort.level` field when present, else $CLAUDE_EFFORT."""
+    effort = payload.get("effort")
+    level = effort.get("level") if isinstance(effort, dict) else None
+    level = level or os.environ.get("CLAUDE_EFFORT")
+    return level.strip().lower() if isinstance(level, str) and level.strip() else None
 
 
 def context(event, text, **fields):
@@ -56,15 +63,11 @@ def handle(payload):
                     bind_main(store, session, payload.get("permission_mode", "default"))
                     result = start_room(store, session, permission_mode=payload.get("permission_mode", "default"), automatic=True)
                     warnings.append(result.get("reason", "Room resume requested; verify status."))
-                profile = ROSTER_BY_NAME[member]
                 model = payload.get("model")
                 observed = model.strip() if isinstance(model, str) and model.strip() else None
                 settings = {
-                    "requested_model": profile["model"],
-                    "requested_effort": profile["effort"],
-                    "model_label": profile["label"],
                     "observed_model": observed,
-                    "observed_effort": None,
+                    "observed_effort": session_effort(payload),
                     "model_observation_source": "Claude SessionStart" if observed else None,
                     "model_observed_at": now() if observed else None,
                 }
@@ -83,7 +86,7 @@ def handle(payload):
             else:
                 instructions = "Preserve unfinished tasks. " + COLLABORATION_GUIDANCE
         else:
-            instructions = "Agent Room is available. Only initialize this project when the admin invokes /init-agents-space. No room has been created."
+            instructions = "Agent Room is available. Only initialize this project when the admin invokes /agent-room:init. No room has been created."
         additional_context = instructions + ("\n" + "\n".join(warnings) if warnings else "")
         return context(event, additional_context, reloadSkills=installed) if additional_context else {}
     if not store.exists():
@@ -107,6 +110,12 @@ def handle(payload):
                        if observed else "No bound delivery observation; no permission or consent.")
             return context(event, detail)
         if not worker and is_owner:
+            level = session_effort(payload)
+            if level:
+                try:
+                    store.sync_gateway_effort(level)
+                except RoomError:
+                    pass  # Effort sync is advisory; it must never block the admin's prompt.
             # Inbox and background-task notifications also fire UserPromptSubmit.
             # These reserved envelopes must never become human authorization.
             path = payload.get("transcript_path")

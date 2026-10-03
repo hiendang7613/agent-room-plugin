@@ -18,10 +18,18 @@ from agent_room.hooks import handle
 from agent_room.knowledge import Knowledge
 from agent_room.native import doctor
 from agent_room.package_verifier import verify_archive
-from agent_room.runtime import Supervisor, approval_response, request_stop, start_room
+from agent_room.roster import EFFORT_LEVELS, NEW_ROOM_MODE, SELECTABLE_MODES
+from agent_room.runtime import Supervisor, approval_response, change_mode, request_stop, start_room
 from agent_room.scaffold import initialize, install_alias
 from agent_room.schema import migrate
 from agent_room.store import NOTE_STATES, Store
+
+
+def mode_note(mode):
+    if mode == "pair":
+        return ("New rooms start in pair mode: 2 members, CLAUDE_WORKER and CODEX_WORKER. "
+                "Run /agent-room:mode advisors for the four-member room.")
+    return f"This room runs in {mode} mode with {len(MODES[mode])} members. Run /agent-room:mode pair or advisors to switch."
 
 
 class RoomParser(argparse.ArgumentParser):
@@ -69,6 +77,14 @@ def parser():
     init = commands.add_parser("init", help="Preserve project instructions, initialize a room, then start native workers")
     init.add_argument("--mode", choices=MODES)
     init.add_argument("--no-start", action="store_true", help="Prepare project files only; no native sessions")
+    mode = commands.add_parser("mode", help="Show the room mode, or switch to pair or advisors now")
+    mode.add_argument("mode", nargs="?", choices=SELECTABLE_MODES)
+    effort = commands.add_parser("effort", help="Show each member's requested effort, or set one member or all")
+    effort.add_argument("level", nargs="?", choices=EFFORT_LEVELS)
+    target = effort.add_mutually_exclusive_group()
+    target.add_argument("--member", help="One member id or alias; default is every room-controlled member")
+    target.add_argument("--all", action="store_true", help="Every room-controlled member (the default)")
+    effort.add_argument("--clear", action="store_true", help="Drop overrides and use the mode's effort")
     start = commands.add_parser("start", help="Start/resume the exact native workers")
     start.add_argument("--mode", choices=MODES)
     status = commands.add_parser("status", help="Read current state, advisory attention and pending inbox counts; no work is started")
@@ -258,12 +274,14 @@ def run(args):
             if not checks["ok"]:
                 raise RoomError("Dependencies are missing. No project files changed.", "dependency", checks=checks)
             if not os.environ.get("AGENT_ROOM_SESSION_ID"):
-                raise RoomError("Run /init-agents-space in Claude Code, or use init --no-start for files only", "identity")
-        room = initialize(args.project, args.mode)
+                raise RoomError("Run /agent-room:init in Claude Code, or use init --no-start for files only", "identity")
+        # New rooms start in pair mode (admin decision 2026-10-03); the library default keeps four members.
+        room = initialize(args.project, args.mode or (None if store.exists() else NEW_ROOM_MODE))
+        mode_info = {"mode": room["mode"], "members": list(MODES[room["mode"]]), "mode_note": mode_note(room["mode"])}
         if args.no_start:
-            return {"initialized": True, "started": False, "room": room}
-        return start_room(store, os.environ.get("AGENT_ROOM_SESSION_ID"),
-                          permission_mode=os.environ.get("AGENT_ROOM_PERMISSION_MODE", "default"))
+            return {"initialized": True, "started": False, "room": room, **mode_info}
+        return {**start_room(store, os.environ.get("AGENT_ROOM_SESSION_ID"),
+                             permission_mode=os.environ.get("AGENT_ROOM_PERMISSION_MODE", "default")), **mode_info}
     if command == "_serve":
         asyncio.run(Supervisor(store, args.generation).run())
         room = store.room()
@@ -273,6 +291,25 @@ def run(args):
     if command == "start":
         return start_room(store, os.environ.get("AGENT_ROOM_SESSION_ID"), args.mode,
                           os.environ.get("AGENT_ROOM_PERMISSION_MODE", "default"))
+    if command == "mode":
+        if not args.mode:
+            status = store.status()
+            return {"mode": status["room"]["mode"], "members": [
+                        {key: member.get(key) for key in ("name", "requested_model", "requested_effort", "effort_source",
+                                                          "observed_model", "observed_effort", "settings_pending_restart")}
+                        | {"in_mode": member["name"] in MODES[status["room"]["mode"]]}
+                        for member in status["members"]],
+                    "gateway_settings_warning": status.get("gateway_settings_warning"),
+                    "choices": list(SELECTABLE_MODES)}
+        if acting_member() != GATEWAY:
+            raise RoomError("Only the admin's main session changes the room mode", "authority")
+        return change_mode(store, args.mode)
+    if command == "effort":
+        if not args.level and not args.clear:
+            return store.effort_report()
+        if acting_member() != GATEWAY:
+            raise RoomError("Only the admin's main session changes member effort", "authority")
+        return store.set_effort(args.level, member=args.member, clear=args.clear)
     if command == "wakes":
         return store.activity_report()
     if command == "status":

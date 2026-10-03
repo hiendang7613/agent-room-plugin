@@ -14,6 +14,8 @@ from agent_room.scaffold import initialize
 from agent_room.store import Store
 from receipts import human_receipt
 
+os.environ.pop("CLAUDE_EFFORT", None)  # Hermetic: the host session effort must not leak into room state.
+
 
 class CLITests(unittest.TestCase):
     def test_task_create_claim_and_related_ack_are_available_in_one_cli_call_each(self):
